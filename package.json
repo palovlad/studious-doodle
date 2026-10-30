@@ -1,0 +1,22 @@
+{
+  "name": "falcon-3d-sim",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Symulator 3D startu i lotu rakiety Falcon 9 (Vite + TypeScript + Three.js)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "GPL-3.0",
+  "dependencies": {
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@types/three": "^0.186.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.7"
+  }
+}
