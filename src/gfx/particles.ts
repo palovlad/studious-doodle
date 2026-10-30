@@ -29,6 +29,11 @@ export interface ExhaustContext {
   groundY: number;
   /** Środek strefy odbicia płomienia (stół startowy). */
   padCenter: THREE.Vector3;
+  /**
+   * Punkt odniesienia pojazdu w świecie. Ogień liczony jest względem niego, więc pióropusz
+   * zawsze trzyma się dyszy, niezależnie od prędkości (km/s) i nierównych klatek.
+   */
+  anchor: THREE.Vector3;
 }
 
 const VERT = /* glsl */ `
@@ -177,6 +182,8 @@ export class ExhaustSystem {
   private emitAccum = 0;
   private smokeAccum = 0;
   private lastSmokePos = new THREE.Vector3(NaN, NaN, NaN);
+  /** Bieżący punkt odniesienia ognia (pozycja obiektu Points w świecie). */
+  private anchor = new THREE.Vector3();
 
   constructor(maxFire = 9000, maxSmoke = 9000) {
     const common = {
@@ -220,12 +227,34 @@ export class ExhaustSystem {
     this.lastSmokePos.set(NaN, NaN, NaN);
   }
 
+  /**
+   * Przesuwa układ odniesienia ognia. Cząstki "przypięte do świata" (rodzaj 1: wybuchy,
+   * płomień odbity od stołu startowego) są kompensowane, żeby zostały w miejscu.
+   */
+  private moveAnchor(next: THREE.Vector3) {
+    const dx = next.x - this.anchor.x;
+    const dy = next.y - this.anchor.y;
+    const dz = next.z - this.anchor.z;
+    if (dx !== 0 || dy !== 0 || dz !== 0) {
+      const f = this.fire;
+      for (let i = 0; i < f.count; i++) {
+        if (f.life[i] <= 0 || f.kind[i] !== 1) continue;
+        f.pos[i * 3] -= dx;
+        f.pos[i * 3 + 1] -= dy;
+        f.pos[i * 3 + 2] -= dz;
+      }
+    }
+    this.anchor.copy(next);
+    this.fire.points.position.copy(next);
+  }
+
   /** Wybuch (np. uderzenie w ziemię). */
   burst(at: THREE.Vector3, scale = 1) {
     for (let i = 0; i < 600 * scale; i++) {
       tmpV.set(Math.random() - 0.5, Math.random() * 0.8, Math.random() - 0.5).normalize();
       tmpV.multiplyScalar(40 + Math.random() * 120 * scale);
-      this.fire.spawn(at, tmpV, 0.6 + Math.random() * 1.2, 6 * scale, 18 * scale, 1.5, 1);
+      tmpP.copy(at).sub(this.anchor);
+      this.fire.spawn(tmpP, tmpV, 0.6 + Math.random() * 1.2, 6 * scale, 18 * scale, 1.5, 1);
     }
     for (let i = 0; i < 400 * scale; i++) {
       tmpV.set(Math.random() - 0.5, Math.random() * 0.6 + 0.2, Math.random() - 0.5).normalize();
@@ -237,6 +266,7 @@ export class ExhaustSystem {
   update(dt: number, emitters: Emitter[], ctx: ExhaustContext) {
     if (dt <= 0) return;
     this.fireMat.uniforms.uCover.value = 0.15 + 0.6 * Math.min(1, ctx.airRatio * 6);
+    this.moveAnchor(ctx.anchor);
     this.emit(dt, emitters, ctx);
     this.simulateFire(dt, ctx);
     this.simulateSmoke(dt, ctx);
@@ -252,7 +282,8 @@ export class ExhaustSystem {
     }
     const vac = 1 - Math.min(1, ctx.airRatio * 4); // 0 przy ziemi, 1 w próżni
     // Liczba cząstek ognia na sekundę na cały pojazd
-    const fireRate = 4200;
+    // W próżni mniej, ale ciaśniej skupionych cząstek (inaczej pojedyncza dysza MVac "wybiela" się)
+    const fireRate = 4200 - vac * 1800;
     this.emitAccum += fireRate * dt;
     const nFire = Math.floor(this.emitAccum);
     this.emitAccum -= nFire;
@@ -260,26 +291,28 @@ export class ExhaustSystem {
     for (let k = 0; k < nFire; k++) {
       const e = active[(Math.random() * active.length) | 0];
       randomPerpendicular(e.direction, tmpA, tmpB);
-      // Rozpraszanie: w próżni pióropusz mocno się rozszerza
-      const spread = 0.05 + vac * 0.45;
+      // Rozpraszanie: w próżni pióropusz rozszerza się tylko nieznacznie (zwarty, skupiony płomień)
+      const spread = 0.05 + vac * 0.07;
       const ang = Math.random() * Math.PI * 2;
       const rad = Math.sqrt(Math.random());
       const sx = Math.cos(ang) * rad;
       const sy = Math.sin(ang) * rad;
-      const speed = (110 + Math.random() * 40) * (0.6 + 0.4 * e.intensity) * (1 - vac * 0.25);
+      const speed = (110 + Math.random() * 40) * (0.6 + 0.4 * e.intensity);
+      // prędkość względem pojazdu (układ ognia porusza się razem z rakietą)
       tmpV.copy(e.direction).multiplyScalar(speed);
       tmpV.addScaledVector(tmpA, sx * speed * spread);
       tmpV.addScaledVector(tmpB, sy * speed * spread);
-      tmpV.add(e.velocity);
-      // losowe przesunięcie w obrębie klatki, by uniknąć "schodków" przy dużej prędkości
+      // losowy wiek początkowy w obrębie klatki, by uniknąć "schodków"
       const back = Math.random() * dt;
       tmpP.copy(e.position)
-        .addScaledVector(tmpA, sx * e.radius * 0.8)
-        .addScaledVector(tmpB, sy * e.radius * 0.8)
-        .addScaledVector(e.velocity, -back);
-      const life = (0.22 + Math.random() * 0.18) * (1 + vac * 0.9);
-      const s0 = e.radius * (3.6 + Math.random() * 1.2) * (0.7 + 0.3 * e.intensity);
-      const s1 = s0 * (2.6 + vac * 3);
+        .sub(this.anchor)
+        .addScaledVector(tmpA, sx * e.radius * 0.7)
+        .addScaledVector(tmpB, sy * e.radius * 0.7)
+        .addScaledVector(tmpV, back);
+      const life = (0.22 + Math.random() * 0.18) * (1 + vac * 0.35);
+      // w próżni: mniejsze cząstki u wylotu, umiarkowany wzrost -> wąski, długi stożek
+      const s0 = e.radius * (3.6 + Math.random() * 1.2) * (0.7 + 0.3 * e.intensity) * (1 - vac * 0.35);
+      const s1 = s0 * (2.6 - vac * 0.6);
       this.fire.spawn(tmpP, tmpV, life, s0, s1, 0, 0);
     }
 
@@ -344,9 +377,11 @@ export class ExhaustSystem {
       f.pos[i3 + 2] += f.vel[i3 + 2] * dt;
 
       // Odbicie od stołu startowego: płomień rozchodzi się na boki (kanał wzdłuż osi Z)
-      if (f.pos[i3 + 1] < ctx.groundY && f.vel[i3 + 1] < 0) {
+      const groundRel = ctx.groundY - this.anchor.y;
+      if (f.pos[i3 + 1] < groundRel && f.vel[i3 + 1] < 0) {
         const vy = -f.vel[i3 + 1];
-        f.pos[i3 + 1] = ctx.groundY;
+        f.pos[i3 + 1] = groundRel;
+        f.kind[i] = 1; // od teraz cząstka zostaje przy stanowisku
         const side = Math.random() < 0.5 ? -1 : 1;
         f.vel[i3] = (Math.random() - 0.5) * vy * 0.4;
         f.vel[i3 + 1] = vy * 0.08 * Math.random();
@@ -355,7 +390,7 @@ export class ExhaustSystem {
         f.life[i] *= 2.2;
         // kłęby pary wodnej z systemu zraszania
         if (Math.random() < 0.08) {
-          tmpP.set(f.pos[i3], ctx.groundY + 2, f.pos[i3 + 2]);
+          tmpP.set(f.pos[i3] + this.anchor.x, ctx.groundY + 2, f.pos[i3 + 2] + this.anchor.z);
           tmpV.set(f.vel[i3] * 0.5, 4 + Math.random() * 10, f.vel[i3 + 2] * 0.6);
           this.smoke.spawn(tmpP, tmpV, 10 + Math.random() * 8, 8, 45 + Math.random() * 30, 0.45, 1);
         }

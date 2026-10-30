@@ -305,7 +305,12 @@ function syncGraphics(realDt: number) {
     }
   }
   const air = s.telemetry.airDensity / 1.225;
-  exhaust.update(realDt, emitters, { airRatio: air, groundY: 1.25, padCenter: new THREE.Vector3() });
+  exhaust.update(realDt, emitters, {
+    airRatio: air,
+    groundY: 1.25,
+    padCenter: new THREE.Vector3(),
+    anchor: rocket.group.position,
+  });
 
   // światło płomienia
   if (intensity > 0.01 && nozzleBuf.length) {
