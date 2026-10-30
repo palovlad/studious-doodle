@@ -71,24 +71,74 @@ export type FlightEvent =
   | 'ABORT'
   | 'SCRUB'
   | 'IMPACT'
-  | 'BOOSTER_IMPACT';
+  | 'BOOSTER_FLIP'
+  | 'ENTRY_BURN'
+  | 'ENTRY_BURN_END'
+  | 'LANDING_BURN'
+  | 'LANDED'
+  | 'LANDING_FAIL';
 
 export interface Vec2 {
   x: number;
   y: number;
 }
 
-/** Odrzucony I stopień — prosta balistyka z oporem (do wizualizacji). */
+export type BoosterPhase =
+  | 'INACTIVE'
+  | 'COAST' // chwilę po separacji
+  | 'FLIP' // manewr obrotu silnikami do przodu (retrograde)
+  | 'BALLISTIC' // lot balistyczny poza atmosferą
+  | 'ENTRY_BURN' // hamowanie przed wejściem w gęste warstwy atmosfery (3 silniki)
+  | 'DESCENT' // opadanie w atmosferze, sterowanie grid fins
+  | 'LANDING_BURN' // hamowanie do lądowania (1 silnik)
+  | 'LANDED'
+  | 'DESTROYED';
+
+/** Odzyskiwany I stopień: lot powrotny i lądowanie na barce na oceanie. */
 export interface BoosterState {
+  /** Czy I stopień jest jeszcze symulowany (w locie). */
   active: boolean;
+  phase: BoosterPhase;
   pos: Vec2;
   vel: Vec2;
   /** Kąt osi rakiety względem lokalnego horyzontu [rad]. */
   pitch: number;
-  pitchRate: number;
   timeSinceSep: number;
+  /** Paliwo pozostałe w I stopniu [kg]. */
+  prop: number;
+  /** Liczba pracujących silników (0, 1 lub 3). */
+  engines: number;
+  throttle: number;
+  throttleCmd: number;
+  /** Silnik wyłączony w trakcie lądowania (zawis — minimalny ciąg > ciężar). */
+  cutoff: boolean;
   gridFinsDeployed: boolean;
   legsDeployed: boolean;
+  /** Pozycja barki (odległość od stanowiska po powierzchni Ziemi) [m]. */
+  shipDownrange: number;
+  /** Paliwo zużyte na entry burn i landing burn [kg]. */
+  entryBurnProp: number;
+  landingBurnProp: number;
+  maxQ: number;
+  touchdownVertical: number;
+  touchdownHorizontal: number;
+  touchdownMiss: number;
+  /** Opis przyczyny utraty I stopnia (pusty przy sukcesie). */
+  failure: string;
+  /** Licznik czasu do kolejnego przeliczenia predykcji naprowadzania [s]. */
+  guidanceTimer: number;
+  /** Ostatni wynik predykcji: czy przy planowanym ciągu stopień nie zdąży wyhamować. */
+  guidanceLate: boolean;
+  /** Ostatni wynik: czy 1 silnik wystarczy do dokończenia hamowania. */
+  guidanceOneEngineOk: boolean;
+  // telemetria
+  altitude: number;
+  verticalSpeed: number;
+  horizontalSpeed: number;
+  speed: number;
+  dynamicPressure: number;
+  downrange: number;
+  thrust: number;
 }
 
 export interface Telemetry {
@@ -227,13 +277,16 @@ export interface GuidanceConfig {
   targetAltitude: number;
   /** Rezerwa paliwa I stopnia (na lądowanie) [ułamek]. */
   boosterReserve: number;
+  /** Planowany ciąg silnika podczas landing burn [0.4..1] — decyduje o momencie zapłonu. */
+  landingThrottle: number;
 }
 
 export const DEFAULT_GUIDANCE: GuidanceConfig = {
   pitchKickSpeed: 55,
   pitchKickAngle: 6.5,
   targetAltitude: 200_000,
-  boosterReserve: 0.06,
+  boosterReserve: 0.08,
+  landingThrottle: 0.75,
 };
 
 export class FlightSim {
@@ -265,16 +318,7 @@ export class FlightSim {
       throttle: 0,
       enginesOn: false,
       maxQReached: false,
-      booster: {
-        active: false,
-        pos: { ...pos },
-        vel: { x: 0, y: 0 },
-        pitch: Math.PI / 2,
-        pitchRate: 0,
-        timeSinceSep: 0,
-        gridFinsDeployed: false,
-        legsDeployed: false,
-      },
+      booster: createBoosterState(pos),
       telemetry: {
         altitude: 0,
         speed: 0,
@@ -354,6 +398,20 @@ export class FlightSim {
 
   setThrottle(x: number) {
     this.state.throttleCmd = clamp(x, VEHICLE.minThrottle, 1);
+  }
+
+  /** Rezerwa paliwa na powrót I stopnia; działa do momentu MECO. */
+  setBoosterReserve(f: number) {
+    if (this.state.stage === 1 && this.state.phase !== 'COAST') {
+      this.guidance.boosterReserve = clamp(f, 0, 0.2);
+    }
+  }
+
+  /** Planowany ciąg landing burn; działa do zapłonu silnika do lądowania. */
+  setLandingThrottle(x: number) {
+    const b = this.state.booster;
+    if (b.phase === 'LANDING_BURN' || b.phase === 'LANDED' || b.phase === 'DESTROYED') return;
+    this.guidance.landingThrottle = clamp(x, VEHICLE.minThrottle, 1);
   }
 
   // --- krok całkowania ---------------------------------------------------
@@ -542,15 +600,13 @@ export class FlightSim {
 
   private separateStage() {
     const s = this.state;
-    const b = s.booster;
+    const b = createBoosterState(s.pos);
     b.active = true;
-    b.pos = { ...s.pos };
+    b.phase = 'COAST';
     b.vel = { ...s.vel };
     b.pitch = s.pitch;
-    b.pitchRate = 0;
-    b.timeSinceSep = 0;
-    b.gridFinsDeployed = false;
-    b.legsDeployed = false;
+    b.prop = s.prop1;
+    s.booster = b;
     s.stage = 2;
     s.throttle = 0;
     // Popychacze pneumatyczne: niewielki przyrost prędkości II stopnia
@@ -559,6 +615,8 @@ export class FlightSim {
     s.vel.y += dir.y * 1.5;
     b.vel.x -= dir.x * 0.5;
     b.vel.y -= dir.y * 0.5;
+    // Barka czeka w punkcie przewidywanego lądowania (obliczonym dla bieżących ustawień)
+    b.shipDownrange = predictBoosterLanding(b, this.guidance.landingThrottle);
     this.phaseTimer = 0;
     this.emit('STAGE_SEP');
   }
@@ -617,49 +675,10 @@ export class FlightSim {
   }
 
   private updateBooster(dt: number) {
-    const s = this.state;
-    const b = s.booster;
+    const b = this.state.booster;
     if (!b.active) return;
-    b.timeSinceSep += dt;
-    const { up, r } = localFrame(b.pos);
-    const alt = r - R_EARTH;
-    const mass = VEHICLE.stage1.dryMass + s.prop1;
-    const rho = airDensity(alt);
-    const speed = Math.hypot(b.vel.x, b.vel.y);
-    const mach = speed / speedOfSound(alt);
-    const drag = 0.5 * rho * speed * speed * dragCoefficient(mach) * VEHICLE.areaBody * 1.6;
-    const g = gravityAt(r);
-    let ax = -g * up.x;
-    let ay = -g * up.y;
-    if (speed > 1e-6) {
-      ax -= (drag * b.vel.x) / speed / mass;
-      ay -= (drag * b.vel.y) / speed / mass;
-    }
-    b.vel.x += ax * dt;
-    b.vel.y += ay * dt;
-    b.pos.x += b.vel.x * dt;
-    b.pos.y += b.vel.y * dt;
-
-    // Manewr obrotu (flip) po separacji, potem stabilizacja silnikami w dół
-    if (b.timeSinceSep > 4 && b.timeSinceSep < 30) {
-      b.pitchRate = 9 * DEG;
-    } else if (b.timeSinceSep >= 30) {
-      const retro = Math.atan2(
-        -(b.vel.x * up.x + b.vel.y * up.y),
-        -(b.vel.x * up.y - b.vel.y * up.x),
-      );
-      // silniki w kierunku lotu -> oś (nos) przeciwnie do prędkości
-      b.pitchRate = clamp(wrapAngle(retro - b.pitch), -0.1, 0.1);
-    }
-    b.pitch = wrapAngle(b.pitch + b.pitchRate * dt);
-
-    if (!b.gridFinsDeployed && b.timeSinceSep > 8) b.gridFinsDeployed = true;
-    if (!b.legsDeployed && alt < 4_000 && b.timeSinceSep > 20) b.legsDeployed = true;
-
-    if (alt <= 0) {
-      b.active = false;
-      this.emit('BOOSTER_IMPACT');
-    }
+    const events = stepBooster(b, dt, this.guidance.landingThrottle, true);
+    for (const e of events) this.emit(e);
   }
 
   private updateTelemetry(thrust: number, gForce: number, eastIn?: Vec2) {
@@ -711,4 +730,406 @@ export class FlightSim {
       this.lastQ = q;
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Odzysk I stopnia: obrót, entry burn, landing burn, lądowanie na barce
+// ---------------------------------------------------------------------------
+
+export const RECOVERY = {
+  /** Prędkość kątowa manewru obrotu [rad/s]. */
+  flipRate: 10 * DEG,
+  /** Wysokość rozpoczęcia entry burn (podczas opadania) [m]. */
+  entryStartAltitude: 70_000,
+  /** Entry burn kończy się po wyhamowaniu do tej prędkości [m/s]. */
+  entryEndSpeed: 900,
+  /** Entry burn nie hamuje poniżej tej prędkości [m/s]. */
+  entryMinSpeed: 450,
+  /** Paliwo zostawiane na landing burn (nadwyżkę zużywa entry burn) [kg]. */
+  landingBudget: 6_000,
+  /** Masa odniesienia dla prędkości końcowej entry burn [kg]. */
+  entryRefMass: 34_000,
+  /** Graniczne ciśnienie dynamiczne — powyżej I stopień rozpada się [Pa]. */
+  qLimit: 100_000,
+  /** Prześwit nóg pod dyszami (dyszami nad pokładem przy przyziemieniu) [m]. */
+  legClearance: 2.4,
+  /** Połowa długości pokładu barki (tolerancja chybienia) [m]. */
+  deckHalfSize: 40,
+  /** Maksymalna bezpieczna prędkość pionowa / pozioma przy przyziemieniu [m/s]. */
+  maxTouchdownVertical: 4,
+  maxTouchdownHorizontal: 3,
+  /** Szybkość narastania ciągu przy zapłonie [1/s]. */
+  spoolRate: 1.6,
+  /** Okres przeliczania predykcji naprowadzania [s]. */
+  guidancePeriod: 0.05,
+  /** Poniżej tej wysokości działa regulator przyziemienia [m]. */
+  terminalAltitude: 150,
+  /** Docelowa wysokość zatrzymania przy planowaniu zapłonu landing burn [m]. */
+  ignitionMargin: 12,
+  /** Mnożnik oporu I stopnia lecącego silnikami do przodu z rozłożonymi grid fins. */
+  dragFactor: 3.2,
+  /** Landing burn nie startuje powyżej tej wysokości [m]. */
+  landingBurnMaxAltitude: 6_000,
+  /** Maksymalne pochylenie od pionu przy korekcie toru podczas lądowania [rad]. */
+  maxTilt: 14 * DEG,
+};
+
+export function createBoosterState(pos: Vec2): BoosterState {
+  return {
+    active: false,
+    phase: 'INACTIVE',
+    pos: { ...pos },
+    vel: { x: 0, y: 0 },
+    pitch: Math.PI / 2,
+    timeSinceSep: 0,
+    prop: 0,
+    engines: 0,
+    throttle: 0,
+    throttleCmd: 0,
+    cutoff: false,
+    gridFinsDeployed: false,
+    legsDeployed: false,
+    shipDownrange: 0,
+    entryBurnProp: 0,
+    landingBurnProp: 0,
+    maxQ: 0,
+    touchdownVertical: 0,
+    touchdownHorizontal: 0,
+    touchdownMiss: 0,
+    failure: '',
+    guidanceTimer: 0,
+    guidanceLate: false,
+    guidanceOneEngineOk: false,
+    altitude: 0,
+    verticalSpeed: 0,
+    horizontalSpeed: 0,
+    speed: 0,
+    dynamicPressure: 0,
+    downrange: 0,
+    thrust: 0,
+  };
+}
+
+function engineThrust1(alt: number): number {
+  const st = VEHICLE.stage1;
+  return st.thrustVac - (st.thrustVac - st.thrustSL) * pressureRatio(alt);
+}
+
+/**
+ * Jeden krok lotu powrotnego I stopnia. Funkcja czysta względem `b` — używana zarówno
+ * w symulacji, jak i do przewidzenia punktu lądowania (ustawienie barki).
+ *
+ * @param landingThrottle planowany ciąg landing burn: wyższy = późniejszy zapłon i mniej paliwa
+ *   (mniejsze straty grawitacyjne), ale mniejszy zapas na korekty; niższy = wcześniejszy zapłon,
+ *   dłuższe hamowanie i większe zużycie paliwa.
+ * @param lateral czy korygować tor w stronę barki (wyłączone przy predykcji).
+ */
+export function stepBooster(
+  b: BoosterState,
+  dt: number,
+  landingThrottle: number,
+  lateral: boolean,
+): FlightEvent[] {
+  const events: FlightEvent[] = [];
+  if (!b.active) return events;
+  b.timeSinceSep += dt;
+  // Predykcje (symulacja w przód) przeliczane 20 razy na sekundę czasu lotu
+  b.guidanceTimer -= dt;
+  const replan = b.guidanceTimer <= 0;
+  if (replan) b.guidanceTimer = RECOVERY.guidancePeriod;
+
+  const st = VEHICLE.stage1;
+  const { up, east, r } = localFrame(b.pos);
+  const altCenter = r - R_EARTH;
+  const alt = altCenter - RECOVERY.legClearance;
+  const vr = b.vel.x * up.x + b.vel.y * up.y;
+  const vh = b.vel.x * east.x + b.vel.y * east.y;
+  const speed = Math.hypot(vr, vh);
+  const mass = st.dryMass + b.prop;
+  const g = gravityAt(r);
+  const T1 = engineThrust1(altCenter);
+  const downrange = Math.atan2(b.pos.x, b.pos.y) * R_EARTH;
+  // oś przeciwna do prędkości: silniki skierowane w kierunku lotu
+  const retro = speed > 1 ? Math.atan2(-vr, -vh) : Math.PI / 2;
+  const rho = airDensity(altCenter);
+  const mach = speed / speedOfSound(altCenter);
+  // I stopień leci silnikami do przodu z rozłożonymi grid fins -> większy opór
+  const dragMag = 0.5 * rho * speed * speed * dragCoefficient(mach) * VEHICLE.areaBody * RECOVERY.dragFactor;
+  const dragAcc = dragMag / mass;
+
+  let cmd = b.pitch;
+  let rate = 5 * DEG;
+  let aReq = 0;
+
+  switch (b.phase) {
+    case 'COAST':
+      if (b.timeSinceSep > 2.5) {
+        b.phase = 'FLIP';
+        events.push('BOOSTER_FLIP');
+      }
+      break;
+    case 'FLIP':
+      cmd = retro;
+      rate = RECOVERY.flipRate;
+      if (Math.abs(wrapAngle(retro - b.pitch)) < 2 * DEG) b.phase = 'BALLISTIC';
+      break;
+    case 'BALLISTIC':
+      cmd = retro;
+      if (b.timeSinceSep > 8) b.gridFinsDeployed = true;
+      if (vr < 0 && altCenter < RECOVERY.entryStartAltitude) {
+        if (b.prop > 0 && speed > RECOVERY.entryEndSpeed) {
+          b.phase = 'ENTRY_BURN';
+          b.engines = 3;
+          b.throttleCmd = 1;
+          events.push('ENTRY_BURN');
+        } else {
+          b.phase = 'DESCENT';
+        }
+      }
+      break;
+    case 'ENTRY_BURN': {
+      cmd = retro;
+      // Cięższy stopień słabiej hamuje w atmosferze (współczynnik balistyczny ~ m),
+      // więc entry burn trwa dłużej: prędkość końcowa skaluje się jak sqrt(m_ref / m).
+      const endSpeed = RECOVERY.entryEndSpeed * Math.sqrt(RECOVERY.entryRefMass / mass);
+      // Nadwyżkę paliwa ponad budżet lądowania zużywamy na dodatkowe hamowanie (łagodniejsze wejście)
+      const reachedNominal = speed <= endSpeed;
+      const keepLandingBudget = b.prop <= RECOVERY.landingBudget;
+      const reachedMinimum = speed <= RECOVERY.entryMinSpeed;
+      if ((reachedNominal && (keepLandingBudget || reachedMinimum)) || b.prop <= 0) {
+        b.engines = 0;
+        b.phase = 'DESCENT';
+        events.push('ENTRY_BURN_END');
+      }
+      break;
+    }
+    case 'DESCENT': {
+      cmd = retro;
+      // Zapłon "hoverslam": komputer przelicza w przód hamowanie przy planowanym ciągu
+      // i odpala silnik, gdy przewidywany punkt zatrzymania schodzi do poziomu pokładu.
+      let ignite = false;
+      let engines = 1;
+      if (altCenter < RECOVERY.landingBurnMaxAltitude && b.prop > 0 && replan) {
+        // Ciężki stopień (duża rezerwa) nie wyhamuje na jednym silniku -> 3 silniki
+        if (predictStopAltitude(b, 1, 1) < 50) engines = 3;
+        // margines obejmuje drogę przebytą między kolejnymi przeliczeniami
+        const m = RECOVERY.ignitionMargin + speed * RECOVERY.guidancePeriod;
+        const planned = predictStopAltitude(b, engines, landingThrottle);
+        // Gdy plan jest niewykonalny (za mało paliwa lub ciągu), zapłon w ostatniej chwili na pełnym ciągu
+        ignite = (planned <= m && planned > -m) || predictStopAltitude(b, engines, 1) <= m;
+      }
+      if (ignite) {
+        b.phase = 'LANDING_BURN';
+        b.engines = engines;
+        b.throttleCmd = landingThrottle;
+        events.push('LANDING_BURN');
+      }
+      break;
+    }
+    case 'LANDING_BURN': {
+      b.legsDeployed = b.legsDeployed || alt < 1_500;
+      if (b.engines > 0) {
+        if (vr >= 0 && alt > 0.3) {
+          // Minimalny ciąg przewyższa ciężar — silnik musi zostać wyłączony nad pokładem
+          b.engines = 0;
+          b.cutoff = true;
+        } else if (alt > RECOVERY.terminalAltitude) {
+          // Faza główna: zaplanowany ciąg; pełny ciąg, jeśli predykcja pokazuje, że nie zdąży wyhamować
+          aReq = (vr * vr) / (2 * Math.max(alt, 0.3)) + g;
+          // 3 -> 1 silnik, gdy jeden silnik na pełnym ciągu wystarczy do dokończenia hamowania
+          if (replan) {
+            b.guidanceOneEngineOk =
+              b.engines === 3 && predictStopAltitude(b, 1, 0.95, Math.min(1, b.throttle * 3)) > 0;
+            b.guidanceLate = predictStopAltitude(b, b.engines, landingThrottle, b.throttle) < 0;
+          }
+          if (b.engines === 3 && b.guidanceOneEngineOk) {
+            b.engines = 1;
+            b.throttle = Math.min(1, b.throttle * 3);
+            b.guidanceOneEngineOk = false;
+          }
+          b.throttleCmd = b.guidanceLate ? 1 : landingThrottle;
+        } else {
+          // Faza końcowa: regulator przyziemienia (stałe opóźnienie do pokładu)
+          aReq = (vr * vr) / (2 * Math.max(alt, 0.3)) + g;
+          const force = (aReq - dragAcc) * mass;
+          b.throttleCmd = clamp(force / (b.engines * T1), VEHICLE.minThrottle, 1);
+        }
+      }
+      // Korekta toru: pochylenie ciągu, by wytracić prędkość poziomą i trafić w barkę
+      const tgo = Math.max(alt / Math.max(-vr, 1), 1);
+      const dx = downrange - b.shipDownrange;
+      // w końcowej fazie priorytetem jest wyzerowanie prędkości poziomej
+      const terminal = clamp((alt - 20) / 400, 0, 1);
+      const vhCmd = lateral ? clamp(-dx / tgo, -30, 30) * terminal : 0;
+      const ah = (vhCmd - vh) / (1 + 1.5 * terminal);
+      const av = Math.max(aReq, g);
+      const tilt = clamp(Math.atan2(ah, av), -RECOVERY.maxTilt, RECOVERY.maxTilt);
+      cmd = b.engines > 0 ? Math.PI / 2 - tilt : Math.PI / 2;
+      rate = 12 * DEG;
+      break;
+    }
+    default:
+      break;
+  }
+
+  // Dynamika przepustnicy (narastanie ciągu po zapłonie)
+  const target = b.engines > 0 ? b.throttleCmd : 0;
+  b.throttle += clamp(target - b.throttle, -4 * dt, RECOVERY.spoolRate * dt);
+  if (b.engines === 0 && b.throttle < 0.02) b.throttle = 0;
+
+  // Spalanie paliwa
+  let thrust = 0;
+  if (b.engines > 0 && b.throttle > 0) {
+    const mdot = (b.engines * b.throttle * st.thrustVac) / (st.ispVac * G0);
+    const burn = Math.min(b.prop, mdot * dt);
+    b.prop -= burn;
+    if (b.phase === 'ENTRY_BURN') b.entryBurnProp += burn;
+    else b.landingBurnProp += burn;
+    thrust = b.engines * b.throttle * T1;
+    if (b.prop <= 0) {
+      b.prop = 0;
+      b.engines = 0;
+    }
+  }
+
+  // Orientacja
+  b.pitch = wrapAngle(b.pitch + clamp(wrapAngle(cmd - b.pitch), -rate * dt, rate * dt));
+
+  // Siły: ciąg wzdłuż osi, opór (I stopień silnikami do przodu + grid fins), grawitacja
+  const axis = attitudeVector(b.pos, b.pitch);
+  let ax = (thrust * axis.x) / mass - g * up.x;
+  let ay = (thrust * axis.y) / mass - g * up.y;
+  if (speed > 1e-6) {
+    ax -= (dragMag * b.vel.x) / speed / mass;
+    ay -= (dragMag * b.vel.y) / speed / mass;
+  }
+  b.vel.x += ax * dt;
+  b.vel.y += ay * dt;
+  b.pos.x += b.vel.x * dt;
+  b.pos.y += b.vel.y * dt;
+
+  const q = 0.5 * rho * speed * speed;
+  b.maxQ = Math.max(b.maxQ, q);
+
+  // telemetria
+  const newR = Math.hypot(b.pos.x, b.pos.y);
+  b.altitude = newR - R_EARTH - RECOVERY.legClearance;
+  b.verticalSpeed = b.vel.x * up.x + b.vel.y * up.y;
+  b.horizontalSpeed = b.vel.x * east.x + b.vel.y * east.y;
+  b.speed = Math.hypot(b.vel.x, b.vel.y);
+  b.dynamicPressure = q;
+  b.downrange = Math.atan2(b.pos.x, b.pos.y) * R_EARTH;
+  b.thrust = thrust;
+
+  // Przeciążenie aerodynamiczne/termiczne bez entry burn
+  if (q > RECOVERY.qLimit) {
+    b.failure = `Rozpad w atmosferze (q = ${(q / 1000).toFixed(0)} kPa) — za mało paliwa na entry burn`;
+    b.phase = 'DESTROYED';
+    b.active = false;
+    b.engines = 0;
+    events.push('LANDING_FAIL');
+    return events;
+  }
+
+  // Przyziemienie
+  if (b.altitude <= 0) {
+    const k = (R_EARTH + RECOVERY.legClearance) / newR;
+    b.pos.x *= k;
+    b.pos.y *= k;
+    const tv = Math.max(0, -b.verticalSpeed);
+    const th = Math.abs(b.horizontalSpeed);
+    const miss = Math.abs(b.downrange - b.shipDownrange);
+    b.touchdownVertical = tv;
+    b.touchdownHorizontal = th;
+    b.touchdownMiss = miss;
+    b.altitude = 0;
+    b.engines = 0;
+    b.throttle = 0;
+    b.thrust = 0;
+    b.vel = { x: 0, y: 0 };
+    b.active = false;
+    const tiltOk = Math.abs(wrapAngle(b.pitch - Math.PI / 2)) < 10 * DEG;
+    if (
+      miss <= RECOVERY.deckHalfSize &&
+      tv <= RECOVERY.maxTouchdownVertical &&
+      th <= RECOVERY.maxTouchdownHorizontal &&
+      tiltOk &&
+      b.legsDeployed
+    ) {
+      b.phase = 'LANDED';
+      b.pitch = Math.PI / 2;
+      events.push('LANDED');
+    } else {
+      b.phase = 'DESTROYED';
+      if (miss > RECOVERY.deckHalfSize) {
+        b.failure = `Uderzenie w ocean ${(miss / 1000).toFixed(miss > 10_000 ? 0 : 2)} km od barki`;
+      } else if (tv > RECOVERY.maxTouchdownVertical) {
+        b.failure = `Twarde przyziemienie: ${tv.toFixed(1)} m/s`;
+      } else if (th > RECOVERY.maxTouchdownHorizontal) {
+        b.failure = `Poślizg po pokładzie: ${th.toFixed(1)} m/s w poziomie`;
+      } else {
+        b.failure = 'Przewrócenie na pokładzie';
+      }
+      if (b.prop <= 0) b.failure += ' (zabrakło paliwa)';
+      else if (b.cutoff) b.failure += ' (wyłączenie silnika w zawisie)';
+      events.push('LANDING_FAIL');
+    }
+  }
+  return events;
+}
+
+/**
+ * Symuluje w przód hamowanie od bieżącego stanu (ciąg przeciwny do prędkości, narastanie ciągu,
+ * opór, grawitacja) i zwraca wysokość, na której prędkość pionowa spadnie do zera.
+ * Wartość ujemna oznacza, że stopień nie zdąży wyhamować przed pokładem.
+ */
+function predictStopAltitude(
+  b: BoosterState,
+  engines: number,
+  throttle: number,
+  initialThrottle = 0,
+): number {
+  const st = VEHICLE.stage1;
+  let px = b.pos.x;
+  let py = b.pos.y;
+  let vx = b.vel.x;
+  let vy = b.vel.y;
+  let prop = b.prop;
+  let thr = initialThrottle;
+  const dt = 0.05;
+  for (let i = 0; i < 1600; i++) {
+    const r = Math.hypot(px, py);
+    const ux = px / r;
+    const uy = py / r;
+    const altC = r - R_EARTH;
+    const alt = altC - RECOVERY.legClearance;
+    const vr = vx * ux + vy * uy;
+    if (vr >= 0) return alt;
+    if (alt <= 0) return vr; // ujemne: prędkość uderzenia
+    thr = thr < throttle ? Math.min(throttle, thr + RECOVERY.spoolRate * dt) : throttle;
+    const v = Math.hypot(vx, vy);
+    const m = st.dryMass + prop;
+    const thrust = prop > 0 ? engines * thr * engineThrust1(altC) : 0;
+    prop = Math.max(0, prop - ((engines * thr * st.thrustVac) / (st.ispVac * G0)) * dt);
+    const rho = airDensity(altC);
+    const drag =
+      0.5 * rho * v * v * dragCoefficient(v / speedOfSound(altC)) * VEHICLE.areaBody * RECOVERY.dragFactor;
+    const g = gravityAt(r);
+    const decel = (thrust + drag) / m / Math.max(v, 1e-3);
+    vx += (-vx * decel - g * ux) * dt;
+    vy += (-vy * decel - g * uy) * dt;
+    px += vx * dt;
+    py += vy * dt;
+  }
+  return 0;
+}
+
+/** Przewiduje miejsce lądowania (odległość po powierzchni) dla zadanych ustawień. */
+export function predictBoosterLanding(b: BoosterState, landingThrottle: number): number {
+  const copy: BoosterState = { ...b, pos: { ...b.pos }, vel: { ...b.vel } };
+  const dt = 1 / 120;
+  for (let i = 0; i < 120 * 1200 && copy.active; i++) {
+    stepBooster(copy, dt, landingThrottle, false);
+  }
+  return copy.downrange;
 }

@@ -372,13 +372,25 @@ export class FalconRocket {
     this.legTarget = deployed ? 1 : 0;
   }
 
-  /** Włącza poświatę dysz proporcjonalnie do ciągu. */
-  setEngineGlow(stage1: number, stage2: number) {
-    for (const g of this.engineGlows) {
-      g.visible = stage1 > 0.01;
+  /**
+   * Włącza poświatę dysz proporcjonalnie do ciągu.
+   * @param stage1Engines liczba pracujących silników I stopnia: 9 (start), 3 (entry burn), 1 (lądowanie)
+   */
+  setEngineGlow(stage1: number, stage2: number, stage1Engines = 9) {
+    const lit = FalconRocket.engineIndices(stage1Engines);
+    this.engineGlows.forEach((g, i) => {
+      g.visible = stage1 > 0.01 && lit.includes(i);
       (g.material as THREE.MeshBasicMaterial).color.setRGB(1, 0.6 + 0.3 * stage1, 0.3 + 0.4 * stage1);
-    }
+    });
     this.mvacGlow.visible = stage2 > 0.01;
+  }
+
+  /** Indeksy silników Merlin pracujących w danej konfiguracji (0 = silnik centralny). */
+  static engineIndices(count: number): number[] {
+    if (count >= 9) return [0, 1, 2, 3, 4, 5, 6, 7, 8];
+    if (count >= 3) return [0, 1, 5];
+    if (count >= 1) return [0];
+    return [];
   }
 
   /** Animacja rozkładania elementów; wywoływać co klatkę. */
@@ -419,11 +431,13 @@ export class FalconRocket {
   }
 
   /** Zwraca światowe pozycje wylotów dysz danego stopnia. */
-  nozzleWorldPositions(stage: 1 | 2, out: THREE.Vector3[] = []): THREE.Vector3[] {
+  nozzleWorldPositions(stage: 1 | 2, out: THREE.Vector3[] = [], stage1Engines = 9): THREE.Vector3[] {
     out.length = 0;
     if (stage === 1) {
       this.stage1.updateWorldMatrix(true, false);
-      for (const p of this.stage1Nozzles) out.push(p.clone().applyMatrix4(this.stage1.matrixWorld));
+      for (const i of FalconRocket.engineIndices(stage1Engines)) {
+        out.push(this.stage1Nozzles[i].clone().applyMatrix4(this.stage1.matrixWorld));
+      }
     } else {
       this.stage2.updateWorldMatrix(true, false);
       out.push(this.mvacNozzle.clone().applyMatrix4(this.stage2.matrixWorld));

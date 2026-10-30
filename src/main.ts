@@ -1,9 +1,18 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { FlightSim, attitudeVector, localFrame, type FlightEvent, type Vec2 } from './sim/physics';
+import {
+  FlightSim,
+  R_EARTH,
+  airDensity,
+  attitudeVector,
+  localFrame,
+  type FlightEvent,
+  type Vec2,
+} from './sim/physics';
 import { FalconRocket } from './gfx/rocket';
 import { ExhaustSystem, type Emitter } from './gfx/particles';
 import { World, EARTH_CENTER, simToWorld } from './gfx/scene';
+import { DroneShip } from './gfx/droneship';
 import { Hud, type CameraMode } from './ui/hud';
 
 // ---------------------------------------------------------------------------
@@ -42,6 +51,16 @@ scene.add(rocket.group);
 
 const exhaust = new ExhaustSystem();
 scene.add(exhaust.group);
+// osobny system cząsteczek dla odzyskiwanego I stopnia (leci niezależnie od II stopnia)
+const boosterExhaust = new ExhaustSystem(5000, 5000);
+scene.add(boosterExhaust.group);
+
+const droneShip = new DroneShip();
+scene.add(droneShip.group);
+
+const PAD_GROUND = new THREE.Vector3(0, 1.25, 0);
+const UP = new THREE.Vector3(0, 1, 0);
+const TRENCH_AXIS = new THREE.Vector3(0, 0, 1);
 
 // Znacznik pozycji rakiety widoczny z dużej odległości (rakieta ma wtedy < 1 px)
 function makeMarkerTexture(): THREE.Texture {
@@ -97,6 +116,8 @@ const hud = new Hud(document.body, {
   onThrottle: (v) => sim.setThrottle(v),
   onCamera: (m) => setCameraMode(m),
   onWarp: (w) => (warp = w),
+  onBoosterReserve: (f) => sim.setBoosterReserve(f),
+  onLandingThrottle: (v) => sim.setLandingThrottle(v),
 });
 
 sim.on(handleEvent);
@@ -113,12 +134,21 @@ function worldVel(v: Vec2, out = new THREE.Vector3()): THREE.Vector3 {
 }
 
 function handleEvent(ev: FlightEvent, t: number) {
-  hud.event(ev, t);
   const s = sim.state;
+  let detail: string | undefined;
+  if (ev === 'LANDING_FAIL') detail = s.booster.failure;
+  if (ev === 'LANDED') {
+    const b = s.booster;
+    detail = `${b.touchdownVertical.toFixed(1)} m/s, ${b.touchdownMiss.toFixed(0)} m od środka, zostało ${(b.prop / 1000).toFixed(1)} t paliwa`;
+  }
+  if (ev === 'LANDING_BURN') detail = `${s.booster.engines} ${s.booster.engines === 1 ? 'silnik' : 'silniki'}`;
+  hud.event(ev, t, detail);
   switch (ev) {
     case 'STAGE_SEP':
       rocket.detachStage1(scene);
       stage1Detached = true;
+      // barka czeka w przewidywanym miejscu lądowania
+      droneShip.place(s.booster.shipDownrange);
       break;
     case 'FAIRING_SEP': {
       rocket.group.updateMatrixWorld(true);
@@ -138,10 +168,15 @@ function handleEvent(ev: FlightEvent, t: number) {
       rocket.group.visible = false;
       rocketDestroyed = true;
       break;
-    case 'BOOSTER_IMPACT':
-      exhaust.burst(rocket.stage1.position.clone(), 0.8);
+    case 'LANDING_FAIL': {
+      // wybuch w środku zbiorników I stopnia
+      const b = s.booster;
+      const axis = attitudeVector(b.pos, b.pitch);
+      const at = rocket.stage1.position.clone().add(tmpV.set(axis.x * 12, axis.y * 12, 0));
+      boosterExhaust.burst(at, 1.6);
       rocket.stage1.visible = false;
       break;
+    }
     default:
       break;
   }
@@ -157,6 +192,8 @@ function resetAll() {
   stage1Detached = false;
   rocketDestroyed = false;
   exhaust.clear();
+  boosterExhaust.clear();
+  droneShip.hide();
   hud.resetUi();
   sim.setThrottle(1);
   setCameraMode(cameraMode, true);
@@ -173,6 +210,12 @@ let wideDistance = 400;
 
 function computeFocus(out: THREE.Vector3): THREE.Vector3 {
   const s = sim.state;
+  if (cameraMode === 'booster' && stage1Detached) {
+    // środek I stopnia (~22 m nad dyszami)
+    const b = s.booster;
+    const ax = attitudeVector(b.pos, b.pitch);
+    return simToWorld(b.pos, out).add(tmpV2.set(ax.x * 22, ax.y * 22, 0));
+  }
   const axis = attitudeVector(s.pos, s.pitch);
   // środek ciężkości wizualnej: ~35 m nad dyszami (całość) lub ~55 m (sam II stopień)
   const off = stage1Detached ? 55 : 35;
@@ -186,13 +229,15 @@ function setCameraMode(m: CameraMode, force = false) {
   computeFocus(focus);
   prevFocus.copy(focus);
   camera.up.set(0, 1, 0);
-  if (m === 'chase' && (changed || force)) {
+  const orbitable = m === 'chase' || m === 'booster';
+  if (orbitable && (changed || force)) {
     const up = tmpV.copy(focus).sub(EARTH_CENTER).normalize();
-    camera.position.copy(focus).add(new THREE.Vector3(60, 0, 150)).addScaledVector(up, -6);
+    const offset = m === 'booster' ? new THREE.Vector3(-40, 0, 110) : new THREE.Vector3(60, 0, 150);
+    camera.position.copy(focus).add(offset).addScaledVector(up, m === 'booster' ? 25 : -6);
     camera.up.copy(up);
     controls.target.copy(focus);
   }
-  controls.enabled = m === 'chase';
+  controls.enabled = orbitable;
   camera.fov = 50;
   camera.updateProjectionMatrix();
 }
@@ -202,6 +247,7 @@ function updateCamera(dt: number) {
   const up = tmpV.copy(focus).sub(EARTH_CENTER).normalize();
 
   switch (cameraMode) {
+    case 'booster':
     case 'chase': {
       // kamera porusza się razem z rakietą; użytkownik może obracać i przybliżać
       camera.position.add(tmpV2.copy(focus).sub(prevFocus));
@@ -282,8 +328,8 @@ function syncGraphics(realDt: number) {
   if (!rocketDestroyed) placeBody(rocket.group, s.pos, s.pitch);
 
   // odłączony I stopień
+  const b = s.booster;
   if (stage1Detached && rocket.stage1.visible) {
-    const b = s.booster;
     placeBody(rocket.stage1, b.pos, b.pitch);
     rocket.setGridFins(b.gridFinsDeployed);
     rocket.setLegs(b.legsDeployed);
@@ -292,7 +338,13 @@ function syncGraphics(realDt: number) {
 
   // dysze i cząsteczki
   const intensity = rocketDestroyed ? 0 : s.telemetry.thrustFraction * (s.throttle > 0 ? 1 : 0);
-  rocket.setEngineGlow(s.stage === 1 ? intensity : 0, s.stage === 2 ? intensity : 0);
+  const boosterBurning = stage1Detached && rocket.stage1.visible && b.engines > 0 && b.throttle > 0.01;
+  if (stage1Detached) {
+    rocket.setEngineGlow(boosterBurning ? b.throttle : 0, s.stage === 2 ? intensity : 0, b.engines);
+  } else {
+    rocket.setEngineGlow(s.stage === 1 ? intensity : 0, 0);
+  }
+  updateBoosterExhaust(realDt, boosterBurning);
 
   emitters.length = 0;
   if (intensity > 0.01) {
@@ -307,8 +359,10 @@ function syncGraphics(realDt: number) {
   const air = s.telemetry.airDensity / 1.225;
   exhaust.update(realDt, emitters, {
     airRatio: air,
-    groundY: 1.25,
-    padCenter: new THREE.Vector3(),
+    groundPoint: PAD_GROUND,
+    groundNormal: UP,
+    deflectAxis: TRENCH_AXIS,
+    steam: true,
     anchor: rocket.group.position,
   });
 
@@ -334,6 +388,32 @@ function syncGraphics(realDt: number) {
       debris.splice(i, 1);
     }
   }
+}
+
+const boosterNozzles: THREE.Vector3[] = [];
+const boosterEmitters: Emitter[] = [];
+
+/** Płomień silników I stopnia podczas entry burn (3 silniki) i landing burn (1 silnik). */
+function updateBoosterExhaust(realDt: number, burning: boolean) {
+  const b = sim.state.booster;
+  boosterEmitters.length = 0;
+  if (burning) {
+    rocket.nozzleWorldPositions(1, boosterNozzles, b.engines);
+    const axis = attitudeVector(b.pos, b.pitch);
+    const dir = new THREE.Vector3(-axis.x, -axis.y, 0);
+    const vel = worldVel(b.vel).multiplyScalar(warp);
+    for (const p of boosterNozzles) {
+      boosterEmitters.push({ position: p, direction: dir, velocity: vel, intensity: b.throttle, radius: 0.45 });
+    }
+  }
+  const alt = Math.hypot(b.pos.x, b.pos.y) - R_EARTH;
+  const shipVisible = droneShip.group.visible;
+  boosterExhaust.update(realDt, boosterEmitters, {
+    airRatio: airDensity(alt) / 1.225,
+    groundPoint: shipVisible ? droneShip.deckCenter : PAD_GROUND,
+    groundNormal: shipVisible ? droneShip.deckNormal : UP,
+    anchor: rocket.stage1.position,
+  });
 }
 
 function updateMarker() {

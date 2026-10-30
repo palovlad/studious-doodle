@@ -158,6 +158,36 @@ html, body {
 }
 .banner.show { opacity: 1; transform: translate(-50%, 0); }
 .banner.warn { border-color: rgba(255, 93, 93, 0.6); color: #ffd0d0; }
+.banner.good { border-color: rgba(94, 224, 138, 0.6); color: #d4ffe2; }
+
+/* --- odzysk I stopnia --- */
+.hud-booster {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  width: 290px;
+  padding: 12px;
+  display: none;
+}
+.hud-booster.show { display: block; }
+.booster-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.booster-head h3 { margin: 0; }
+.booster-status { font-size: 10px; padding: 2px 6px; white-space: nowrap; }
+.booster-status[data-phase='ENTRY_BURN'], .booster-status[data-phase='LANDING_BURN'] {
+  background: rgba(255, 154, 61, 0.18);
+  color: #ffb36b;
+}
+.booster-status[data-phase='LANDED'] { background: rgba(94, 224, 138, 0.16); color: var(--good); }
+.booster-status[data-phase='DESTROYED'] { background: rgba(255, 93, 93, 0.18); color: var(--warn); }
+.tel-value.small { font-size: 14px; }
+.bar-fill.fuel.low { background: var(--warn); }
+.booster-result { margin-top: 8px; font-size: 12px; line-height: 1.35; }
+.booster-result:empty { display: none; }
+.booster-result.good { color: var(--good); }
+.booster-result.warn { color: var(--warn); }
+
+.recovery { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+input[type='range']:disabled { opacity: 0.4; }
 
 /* --- sterowanie --- */
 .hud-controls {
@@ -199,7 +229,7 @@ input[type='range'] {
 }
 
 .cam-row { display: flex; align-items: center; gap: 10px; }
-.seg { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; flex: 1; }
+.seg { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; flex: 1; }
 .seg-btn {
   font: inherit;
   font-size: 12px;
@@ -247,6 +277,12 @@ input[type='range'] {
   .tel-value { font-size: 14px; }
   .bar-row { grid-template-columns: 38px 1fr 48px; gap: 4px; }
   .hud-log { display: none; }
+  .hud-booster { top: 56px; right: 8px; bottom: auto; width: 168px; padding: 8px; }
+  .hud-booster .tel-grid { grid-template-columns: 1fr; gap: 2px; }
+  .hud-booster .tel-cell:nth-child(n + 4) { display: none; }
+  .booster-head { flex-wrap: wrap; gap: 4px; }
+  .booster-status { font-size: 9px; }
+  .recovery { gap: 8px; }
+  .seg-btn { font-size: 10px; }
   .hud-controls { bottom: 8px; padding: 10px; gap: 8px; }
-  .seg-btn { font-size: 11px; }
 }

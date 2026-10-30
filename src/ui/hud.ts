@@ -1,8 +1,8 @@
 import './hud.css';
-import type { FlightEvent, FlightPhase, SimState } from '../sim/physics';
-import { VEHICLE } from '../sim/physics';
+import type { BoosterPhase, FlightEvent, FlightPhase, SimState } from '../sim/physics';
+import { DEFAULT_GUIDANCE, VEHICLE } from '../sim/physics';
 
-export type CameraMode = 'chase' | 'onboard' | 'ground' | 'wide';
+export type CameraMode = 'chase' | 'onboard' | 'ground' | 'wide' | 'booster';
 
 export interface HudCallbacks {
   onLaunch(): void;
@@ -11,6 +11,10 @@ export interface HudCallbacks {
   onThrottle(value: number): void;
   onCamera(mode: CameraMode): void;
   onWarp(factor: number): void;
+  /** Rezerwa paliwa I stopnia na powrót [ułamek masy paliwa]. */
+  onBoosterReserve(fraction: number): void;
+  /** Planowany ciąg landing burn [0.4..1]. */
+  onLandingThrottle(value: number): void;
 }
 
 const CAMERA_LABELS: Record<CameraMode, string> = {
@@ -18,6 +22,19 @@ const CAMERA_LABELS: Record<CameraMode, string> = {
   onboard: 'Pokładowa',
   ground: 'Naziemna',
   wide: 'Panorama',
+  booster: 'Booster',
+};
+
+const BOOSTER_PHASE_LABELS: Record<BoosterPhase, string> = {
+  INACTIVE: '—',
+  COAST: 'SEPARACJA',
+  FLIP: 'MANEWR OBROTU',
+  BALLISTIC: 'LOT BALISTYCZNY',
+  ENTRY_BURN: 'ENTRY BURN',
+  DESCENT: 'OPADANIE — GRID FINS',
+  LANDING_BURN: 'LANDING BURN',
+  LANDED: 'WYLĄDOWAŁ',
+  DESTROYED: 'UTRACONY',
 };
 
 const PHASE_LABELS: Record<FlightPhase, string> = {
@@ -45,7 +62,12 @@ export const EVENT_LABELS: Record<FlightEvent, string> = {
   ABORT: 'ABORT — silniki wyłączone',
   SCRUB: 'Start wstrzymany na stole startowym',
   IMPACT: 'Zderzenie z powierzchnią',
-  BOOSTER_IMPACT: 'I stopień uderzył w ocean',
+  BOOSTER_FLIP: 'I stopień: manewr obrotu silnikami do przodu',
+  ENTRY_BURN: 'I stopień: entry burn (3 silniki)',
+  ENTRY_BURN_END: 'I stopień: koniec entry burn',
+  LANDING_BURN: 'I stopień: landing burn',
+  LANDED: 'I stopień wylądował na barce!',
+  LANDING_FAIL: 'I stopień utracony',
 };
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -102,6 +124,15 @@ export class Hud {
   private lastTrackT = -Infinity;
   private banner: HTMLElement;
   private bannerTimer = 0;
+  private boosterPanel: HTMLElement;
+  private boosterStatus: HTMLElement;
+  private boosterResult: HTMLElement;
+  private boosterReadouts: Record<string, HTMLElement> = {};
+  private boosterFuelBar: HTMLElement;
+  private reserve: HTMLInputElement;
+  private reserveLabel: HTMLElement;
+  private landingThrottle: HTMLInputElement;
+  private landingThrottleLabel: HTMLElement;
 
   constructor(parent: HTMLElement, private cb: HudCallbacks) {
     this.root = el('div', 'hud');
@@ -172,6 +203,43 @@ export class Hud {
     log.appendChild(this.logList);
     this.root.appendChild(log);
 
+    // --- odzysk I stopnia ---
+    this.boosterPanel = el('div', 'hud-booster panel');
+    const bHead = el('div', 'booster-head');
+    bHead.appendChild(el('h3', undefined, 'Odzysk I stopnia'));
+    this.boosterStatus = el('span', 'phase booster-status', '—');
+    bHead.appendChild(this.boosterStatus);
+    this.boosterPanel.appendChild(bHead);
+    const bGrid = el('div', 'tel-grid');
+    const addB = (key: string, label: string) => {
+      const cell = el('div', 'tel-cell');
+      cell.appendChild(el('div', 'tel-label', label));
+      const value = el('div', 'tel-value small', '—');
+      cell.appendChild(value);
+      bGrid.appendChild(cell);
+      this.boosterReadouts[key] = value;
+    };
+    addB('alt', 'Wysokość');
+    addB('vs', 'Pr. pionowa');
+    addB('speed', 'Prędkość');
+    addB('ship', 'Do barki');
+    addB('q', 'Ciśn. dynam.');
+    addB('engines', 'Silniki');
+    this.boosterPanel.appendChild(bGrid);
+    const fuelRow = el('div', 'bar-row');
+    fuelRow.appendChild(el('span', 'bar-label', 'Paliwo'));
+    const fuelTrack = el('div', 'bar-track');
+    this.boosterFuelBar = el('div', 'bar-fill fuel');
+    fuelTrack.appendChild(this.boosterFuelBar);
+    fuelRow.appendChild(fuelTrack);
+    fuelRow.appendChild(el('span', 'bar-val', '—'));
+    const bBars = el('div', 'bars');
+    bBars.appendChild(fuelRow);
+    this.boosterPanel.appendChild(bBars);
+    this.boosterResult = el('div', 'booster-result');
+    this.boosterPanel.appendChild(this.boosterResult);
+    this.root.appendChild(this.boosterPanel);
+
     // --- baner zdarzeń ---
     this.banner = el('div', 'banner');
     this.root.appendChild(this.banner);
@@ -211,6 +279,62 @@ export class Hud {
     thr.appendChild(this.throttle);
     ctl.appendChild(thr);
 
+    // ustawienia odzysku I stopnia
+    const rec = el('div', 'recovery');
+    const slider = (
+      label: string,
+      min: number,
+      max: number,
+      step: number,
+      value: number,
+      onInput: (v: number) => void,
+    ): [HTMLInputElement, HTMLElement] => {
+      const box = el('div', 'throttle');
+      const head = el('div', 'ctl-head');
+      head.appendChild(el('span', undefined, label));
+      const val = el('span', 'ctl-val');
+      head.appendChild(val);
+      box.appendChild(head);
+      const input = el('input');
+      input.type = 'range';
+      input.min = String(min);
+      input.max = String(max);
+      input.step = String(step);
+      input.value = String(value);
+      input.oninput = () => onInput(Number(input.value));
+      box.appendChild(input);
+      rec.appendChild(box);
+      return [input, val];
+    };
+    [this.reserve, this.reserveLabel] = slider(
+      'Rezerwa paliwa I st.',
+      0,
+      15,
+      0.5,
+      DEFAULT_GUIDANCE.boosterReserve * 100,
+      (v) => {
+        this.updateReserveLabel(v);
+        this.cb.onBoosterReserve(v / 100);
+      },
+    );
+    [this.landingThrottle, this.landingThrottleLabel] = slider(
+      'Ciąg lądowania',
+      VEHICLE.minThrottle * 100,
+      100,
+      1,
+      DEFAULT_GUIDANCE.landingThrottle * 100,
+      (v) => {
+        this.landingThrottleLabel.textContent = `${v}%`;
+        this.cb.onLandingThrottle(v / 100);
+      },
+    );
+    this.updateReserveLabel(Number(this.reserve.value));
+    this.landingThrottleLabel.textContent = `${this.landingThrottle.value}%`;
+    rec.title =
+      'Więcej rezerwy = bezpieczniejszy powrót, ale mniej paliwa na orbitę. ' +
+      'Wyższy ciąg lądowania = późniejszy zapłon i mniejsze zużycie paliwa, ale mniejszy zapas na korekty.';
+    ctl.appendChild(rec);
+
     const camRow = el('div', 'cam-row');
     camRow.appendChild(el('span', 'ctl-head-inline', 'Kamera'));
     const camBtns = el('div', 'seg');
@@ -240,7 +364,7 @@ export class Hud {
     ctl.appendChild(warpRow);
 
     ctl.appendChild(
-      el('div', 'hint', 'Spacja: start · A: abort · R: reset · ↑/↓: ciąg · 1–4: kamera · mysz: obrót/zoom'),
+      el('div', 'hint', 'Spacja: start · A: abort · R: reset · ↑/↓: ciąg · 1–5: kamera · mysz: obrót/zoom'),
     );
     this.root.appendChild(ctl);
 
@@ -278,7 +402,8 @@ export class Hud {
         case '1':
         case '2':
         case '3':
-        case '4': {
+        case '4':
+        case '5': {
           const m = modes[Number(e.key) - 1];
           this.setCamera(m);
           this.cb.onCamera(m);
@@ -296,6 +421,11 @@ export class Hud {
     this.throttle.dispatchEvent(new Event('input'));
   }
 
+  private updateReserveLabel(pct: number) {
+    const tons = (VEHICLE.stage1.propMass * pct) / 100 / 1000;
+    this.reserveLabel.textContent = `${pct.toFixed(1)}% · ${tons.toFixed(1)} t`;
+  }
+
   setCamera(mode: CameraMode) {
     for (const [m, b] of this.camButtons) b.classList.toggle('active', m === mode);
   }
@@ -307,21 +437,33 @@ export class Hud {
     this.throttle.value = '100';
     this.throttleLabel.textContent = '100%';
     this.banner.classList.remove('show');
+    this.boosterResult.textContent = '';
+    this.boosterResult.className = 'booster-result';
   }
 
-  event(ev: FlightEvent, t: number) {
+  /** Dopisuje zdarzenie do dziennika i pokazuje baner. `detail` uzupełnia opis (np. przyczynę). */
+  event(ev: FlightEvent, t: number, detail?: string) {
+    const text = detail ? `${EVENT_LABELS[ev].replace(/!$/, '')} — ${detail}` : EVENT_LABELS[ev];
     const li = el('li');
     li.appendChild(el('span', 'log-t', fmtClock(t)));
-    li.appendChild(el('span', 'log-msg', EVENT_LABELS[ev]));
-    if (ev === 'ABORT' || ev === 'IMPACT' || ev === 'SCRUB') li.classList.add('warn');
-    if (ev === 'ORBIT' || ev === 'LIFTOFF') li.classList.add('good');
+    li.appendChild(el('span', 'log-msg', text));
+    if (ev === 'ABORT' || ev === 'IMPACT' || ev === 'SCRUB' || ev === 'LANDING_FAIL') li.classList.add('warn');
+    if (ev === 'ORBIT' || ev === 'LIFTOFF' || ev === 'LANDED') li.classList.add('good');
     this.logList.prepend(li);
     while (this.logList.children.length > 14) this.logList.lastChild?.remove();
 
-    if (ev !== 'BOOSTER_IMPACT') {
-      this.banner.textContent = EVENT_LABELS[ev];
-      this.banner.className = 'banner show' + (li.classList.contains('warn') ? ' warn' : '');
-      this.bannerTimer = 3.5;
+    // drobne zdarzenia boostera tylko w dzienniku, ważne także na banerze
+    if (ev !== 'ENTRY_BURN_END' && ev !== 'BOOSTER_FLIP') {
+      this.banner.textContent = text;
+      this.banner.className =
+        'banner show' +
+        (li.classList.contains('warn') ? ' warn' : '') +
+        (li.classList.contains('good') ? ' good' : '');
+      this.bannerTimer = ev === 'LANDED' || ev === 'LANDING_FAIL' ? 6 : 3.5;
+    }
+    if (ev === 'LANDED' || ev === 'LANDING_FAIL') {
+      this.boosterResult.textContent = text;
+      this.boosterResult.className = 'booster-result ' + (ev === 'LANDED' ? 'good' : 'warn');
     }
   }
 
@@ -362,6 +504,8 @@ export class Hud {
     setBar(this.gBar, T.gForce / 6, `${T.gForce.toFixed(1)}g`);
     this.gBar.classList.toggle('high', T.gForce > 4);
 
+    this.updateBooster(s);
+
     const flying = s.phase !== 'PRELAUNCH' && s.phase !== 'SCRUBBED';
     this.launchBtn.disabled = s.phase !== 'PRELAUNCH';
     this.abortBtn.disabled = !['IGNITION', 'ASCENT', 'COAST', 'STAGE2'].includes(s.phase);
@@ -379,6 +523,32 @@ export class Hud {
       this.bannerTimer -= dt;
       if (this.bannerTimer <= 0) this.banner.classList.remove('show');
     }
+  }
+
+  private updateBooster(s: SimState) {
+    const b = s.booster;
+    const shown = b.phase !== 'INACTIVE';
+    this.boosterPanel.classList.toggle('show', shown);
+    // rezerwa ustalana do MECO, ciąg lądowania do zapłonu landing burn
+    this.reserve.disabled = s.stage === 2 || s.phase === 'COAST';
+    this.landingThrottle.disabled =
+      b.phase === 'LANDING_BURN' || b.phase === 'LANDED' || b.phase === 'DESTROYED';
+    if (!shown) return;
+    this.boosterStatus.textContent =
+      b.phase === 'LANDING_BURN' ? `LANDING BURN · ${b.engines || 0} SIL.` : BOOSTER_PHASE_LABELS[b.phase];
+    this.boosterStatus.dataset.phase = b.phase;
+    const r = this.boosterReadouts;
+    r.alt.textContent = fmtDist(Math.max(0, b.altitude));
+    r.vs.textContent = `${b.verticalSpeed.toFixed(0)} m/s`;
+    r.speed.textContent = `${b.speed.toFixed(0)} m/s`;
+    r.ship.textContent = fmtDist(Math.abs(b.shipDownrange - b.downrange));
+    r.q.textContent = `${(b.dynamicPressure / 1000).toFixed(1)} kPa`;
+    r.engines.textContent = b.engines > 0 ? `${b.engines} × ${(b.throttle * 100).toFixed(0)}%` : 'wył.';
+    const frac = b.prop / VEHICLE.stage1.propMass;
+    this.boosterFuelBar.style.width = `${Math.min(1, frac / 0.15) * 100}%`;
+    (this.boosterFuelBar.parentElement!.nextElementSibling as HTMLElement).textContent =
+      `${(b.prop / 1000).toFixed(1)} t`;
+    this.boosterFuelBar.classList.toggle('low', b.prop < 2_000);
   }
 
   private drawPlot() {

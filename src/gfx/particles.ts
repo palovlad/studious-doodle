@@ -25,10 +25,14 @@ export interface Emitter {
 export interface ExhaustContext {
   /** Gęstość powietrza względem poziomu morza (0 = próżnia). */
   airRatio: number;
-  /** Wysokość podłoża w świecie (płaszczyzna stołu startowego). */
-  groundY: number;
-  /** Środek strefy odbicia płomienia (stół startowy). */
-  padCenter: THREE.Vector3;
+  /** Punkt na płaszczyźnie podłoża (stół startowy lub pokład barki) w świecie. */
+  groundPoint: THREE.Vector3;
+  /** Normalna płaszczyzny podłoża (wersor). */
+  groundNormal: THREE.Vector3;
+  /** Kierunek kanału odprowadzającego płomienie (brak = rozpływ we wszystkich kierunkach). */
+  deflectAxis?: THREE.Vector3;
+  /** Czy przy odbiciu tworzyć kłęby pary wodnej (system zraszania stanowiska). */
+  steam?: boolean;
   /**
    * Punkt odniesienia pojazdu w świecie. Ogień liczony jest względem niego, więc pióropusz
    * zawsze trzyma się dyszy, niezależnie od prędkości (km/s) i nierównych klatek.
@@ -376,22 +380,44 @@ export class ExhaustSystem {
       f.pos[i3 + 1] += f.vel[i3 + 1] * dt;
       f.pos[i3 + 2] += f.vel[i3 + 2] * dt;
 
-      // Odbicie od stołu startowego: płomień rozchodzi się na boki (kanał wzdłuż osi Z)
-      const groundRel = ctx.groundY - this.anchor.y;
-      if (f.pos[i3 + 1] < groundRel && f.vel[i3 + 1] < 0) {
-        const vy = -f.vel[i3 + 1];
-        f.pos[i3 + 1] = groundRel;
-        f.kind[i] = 1; // od teraz cząstka zostaje przy stanowisku
-        const side = Math.random() < 0.5 ? -1 : 1;
-        f.vel[i3] = (Math.random() - 0.5) * vy * 0.4;
-        f.vel[i3 + 1] = vy * 0.08 * Math.random();
-        f.vel[i3 + 2] = side * vy * (0.5 + Math.random() * 0.3);
+      // Odbicie od podłoża: płomień rozpływa się po stole startowym / pokładzie barki
+      const n = ctx.groundNormal;
+      const gp = ctx.groundPoint;
+      const wx = f.pos[i3] + this.anchor.x;
+      const wy = f.pos[i3 + 1] + this.anchor.y;
+      const wz = f.pos[i3 + 2] + this.anchor.z;
+      const dist = (wx - gp.x) * n.x + (wy - gp.y) * n.y + (wz - gp.z) * n.z;
+      const vn = f.vel[i3] * n.x + f.vel[i3 + 1] * n.y + f.vel[i3 + 2] * n.z;
+      if (dist < 0 && vn < 0 && f.kind[i] === 0) {
+        const into = -vn;
+        // przesunięcie na powierzchnię
+        f.pos[i3] -= n.x * dist;
+        f.pos[i3 + 1] -= n.y * dist;
+        f.pos[i3 + 2] -= n.z * dist;
+        f.kind[i] = 1; // od teraz cząstka zostaje w miejscu (nie leci za pojazdem)
+        if (ctx.deflectAxis) {
+          // kanał odprowadzający: płomień wylatuje na boki wzdłuż osi kanału
+          tmpA.copy(ctx.deflectAxis).multiplyScalar(Math.random() < 0.5 ? -1 : 1);
+          tmpB.copy(n).cross(tmpA);
+          tmpV.copy(tmpA).multiplyScalar(into * (0.5 + Math.random() * 0.3));
+          tmpV.addScaledVector(tmpB, (Math.random() - 0.5) * into * 0.4);
+        } else {
+          // rozpływ promienisty po pokładzie
+          randomPerpendicular(n, tmpA, tmpB);
+          const a = Math.random() * Math.PI * 2;
+          tmpV.copy(tmpA).multiplyScalar(Math.cos(a)).addScaledVector(tmpB, Math.sin(a));
+          tmpV.multiplyScalar(into * (0.4 + Math.random() * 0.4));
+        }
+        tmpV.addScaledVector(n, into * 0.08 * Math.random());
+        f.vel[i3] = tmpV.x;
+        f.vel[i3 + 1] = tmpV.y;
+        f.vel[i3 + 2] = tmpV.z;
         f.drag[i] = 2.5;
         f.life[i] *= 2.2;
         // kłęby pary wodnej z systemu zraszania
-        if (Math.random() < 0.08) {
-          tmpP.set(f.pos[i3] + this.anchor.x, ctx.groundY + 2, f.pos[i3 + 2] + this.anchor.z);
-          tmpV.set(f.vel[i3] * 0.5, 4 + Math.random() * 10, f.vel[i3 + 2] * 0.6);
+        if (ctx.steam && Math.random() < 0.08) {
+          tmpP.set(f.pos[i3], f.pos[i3 + 1], f.pos[i3 + 2]).add(this.anchor).addScaledVector(n, 2);
+          tmpV.multiplyScalar(0.55).addScaledVector(n, 4 + Math.random() * 10);
           this.smoke.spawn(tmpP, tmpV, 10 + Math.random() * 8, 8, 45 + Math.random() * 30, 0.45, 1);
         }
       }
@@ -442,9 +468,20 @@ export class ExhaustSystem {
       s.pos[i3] += (s.vel[i3] + 2.5) * dt;
       s.pos[i3 + 1] += s.vel[i3 + 1] * dt;
       s.pos[i3 + 2] += s.vel[i3 + 2] * dt;
-      if (s.pos[i3 + 1] < ctx.groundY + 1) {
-        s.pos[i3 + 1] = ctx.groundY + 1;
-        if (s.vel[i3 + 1] < 0) s.vel[i3 + 1] = 0;
+      // dym nie wnika pod podłoże
+      const n = ctx.groundNormal;
+      const gp = ctx.groundPoint;
+      const d = (s.pos[i3] - gp.x) * n.x + (s.pos[i3 + 1] - gp.y) * n.y + (s.pos[i3 + 2] - gp.z) * n.z;
+      if (d < 1) {
+        s.pos[i3] += n.x * (1 - d);
+        s.pos[i3 + 1] += n.y * (1 - d);
+        s.pos[i3 + 2] += n.z * (1 - d);
+        const vn = s.vel[i3] * n.x + s.vel[i3 + 1] * n.y + s.vel[i3 + 2] * n.z;
+        if (vn < 0) {
+          s.vel[i3] -= n.x * vn;
+          s.vel[i3 + 1] -= n.y * vn;
+          s.vel[i3 + 2] -= n.z * vn;
+        }
       }
       // rozmiar: szybki wzrost na początku, potem powolny
       const g = 1 - Math.pow(1 - t, 3);
