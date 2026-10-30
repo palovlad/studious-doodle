@@ -15,6 +15,11 @@ npm run build     # typecheck (tsc) + build produkcyjny do dist/
 npm run preview   # podgląd zbudowanej wersji
 ```
 
+## Deploy
+
+Każdy push na `main` buduje projekt i publikuje go na GitHub Pages
+(workflow `.github/workflows/deploy.yml`): https://palovlad.github.io/studious-doodle/
+
 ## Sterowanie
 
 | Akcja | Przycisk / klawisz |
