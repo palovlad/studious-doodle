@@ -30,6 +30,7 @@ Każdy push na `main` buduje projekt i publikuje go na GitHub Pages
 | Przepustnica (40–100%) | suwak / `↑` `↓` |
 | Kamera: pościg, pokładowa, naziemna, panorama, booster, Ziemia | przyciski / `1`–`6` |
 | Dźwięk: wyciszenie / głośność | 🔊 i suwak / `M` |
+| Komentarz kontroli lotów wł./wył. | 🎧 / `V` |
 | Rezerwa paliwa I stopnia na powrót (0–15%, do MECO) | suwak „Rezerwa paliwa I st.” |
 | Planowany ciąg landing burn (40–100%) | suwak „Ciąg lądowania” |
 | Przyspieszenie czasu | lista „Czas” (×1 … ×50) |
@@ -47,6 +48,7 @@ src/
 ├── gfx/earth.ts       # proceduralna Ziemia (shader GPU) i warstwa chmur
 ├── gfx/scene.ts       # stanowisko startowe, światło, niebo, atmosfera
 ├── audio/sfx.ts       # proceduralne dźwięki (Web Audio API)
+├── audio/voice.ts     # komentarze kontroli lotów (kolejka, efekt radiowy)
 └── ui/hud.ts (+ .css) # telemetria i panel sterowania
 ```
 
@@ -113,6 +115,28 @@ Dźwięk włącza się po pierwszym kliknięciu albo naciśnięciu klawisza.
   - powracający I stopień ma osobny dźwięk.
 - **Wybuch**: przy zderzeniu z ziemią i nieudanym lądowaniu (huk, niski „thump”, pogłos).
 - **Drobne efekty**: syk pneumatyki przy separacji i zrzucie owiewki, „klik” zapłonu silników.
+
+### Komentarze kontroli lotów
+42 nagrania po angielsku (US) wygenerowane modelem TTS `google/gemini-3.8-flash-tts` przez OpenRouter. Trzy głosy:
+- **Charon**: dyrektor startu,
+- **Kore**: komentatorka transmisji,
+- **Puck**: kontrola odzysku I stopnia.
+
+Rodzaje kwestii:
+- **kluczowe**, przypięte do zdarzeń misji: odliczanie i zapłon, start, Mach 1, Max-Q, MECO, separacja, zapłon MVac, owiewka, SECO, orbita, abort, odzysk boostera (obrót, entry/landing burn, nogi, lądowanie albo utrata),
+- **wywołania telemetrii**: 10 / 50 / 100 / 150 km wysokości i 500 km od stanowiska,
+- **komentarze sytuacyjne**, losowane co 18–30 s, gdy nic się nie dzieje, osobne dla każdej fazy: przed startem, wznoszenie, II stopień, powrót boostera, orbita.
+
+Odtwarzanie (`src/audio/voice.ts`):
+- filtr „radiowy” i sygnały quindar przed i po kwestii, a ryk silników cichnie na czas wypowiedzi,
+- ważniejsza kwestia przerywa komentarz sytuacyjny, a przeterminowane kwestie przepadają,
+- przy przyspieszonym czasie (× 5 i więcej) grają tylko kwestie kluczowe.
+
+**Regeneracja nagrań**
+1. Teksty, role i głosy są w `scripts/voice-lines.json`.
+2. Każdą kwestię generujesz modelem TTS w formacie PCM (s16le, 24 kHz, mono). Model obsługuje tylko PCM. Pliki zapisujesz jako `<id>.pcm`.
+3. `scripts/encode-vo.sh <katalog_pcm>` przycina ciszę, normalizuje głośność i koduje MP3 do `public/audio/vo/`.
+4. `node scripts/build-vo-manifest.mjs` buduje `public/audio/vo/manifest.json`.
 
 ## Licencja
 

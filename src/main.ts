@@ -14,6 +14,7 @@ import { ExhaustSystem, type Emitter } from './gfx/particles';
 import { World, EARTH_CENTER, simToWorld } from './gfx/scene';
 import { DroneShip } from './gfx/droneship';
 import { SoundEngine, SPEED_OF_SOUND } from './audio/sfx';
+import { MissionControl } from './audio/voice';
 import { Hud, type CameraMode } from './ui/hud';
 
 // ---------------------------------------------------------------------------
@@ -99,8 +100,20 @@ scene.add(flameLight);
 const sim = new FlightSim();
 const sound = new SoundEngine();
 // AudioContext można utworzyć dopiero po geście użytkownika (polityka autoplay)
+const missionControl = new MissionControl(sound);
+let voicePrefetched = false;
 for (const ev of ['pointerdown', 'keydown', 'touchstart'] as const) {
-  window.addEventListener(ev, () => sound.unlock(), { passive: true });
+  window.addEventListener(
+    ev,
+    () => {
+      sound.unlock();
+      if (!voicePrefetched && missionControl.loaded > 0) {
+        voicePrefetched = true;
+        missionControl.prefetch();
+      }
+    },
+    { passive: true },
+  );
 }
 let warp = 1;
 let cameraMode: CameraMode = 'chase';
@@ -126,7 +139,9 @@ const hud = new Hud(document.body, {
   onLandingThrottle: (v) => sim.setLandingThrottle(v),
   onVolume: (v) => sound.setVolume(v),
   onMute: (m) => sound.setMuted(m),
+  onVoice: (on) => missionControl.setEnabled(on),
 });
+hud.setVoiceState(missionControl.isEnabled);
 hud.setAudioState(sound.state.volume, sound.state.muted);
 
 sim.on(handleEvent);
@@ -153,6 +168,7 @@ function handleEvent(ev: FlightEvent, t: number) {
   if (ev === 'LANDING_BURN') detail = `${s.booster.engines} ${s.booster.engines === 1 ? 'silnik' : 'silniki'}`;
   hud.event(ev, t, detail);
   playEventSound(ev);
+  missionControl.onEvent(ev);
   switch (ev) {
     case 'STAGE_SEP':
       rocket.detachStage1(scene);
@@ -238,6 +254,7 @@ function resetAll() {
   rocketDestroyed = false;
   exhaust.clear();
   boosterExhaust.clear();
+  missionControl.reset();
   droneShip.hide();
   hud.resetUi();
   sim.setThrottle(1);
@@ -553,6 +570,7 @@ function frame(time: number) {
   updateCamera(realDt);
   updateMarker();
   updateSound();
+  missionControl.update(sim.state, warp, realDt);
   world.update(camera, focus);
   exhaust.setViewport(renderer.domElement.height, camera.fov);
   hud.update(sim.state, realDt);
@@ -564,4 +582,4 @@ document.querySelector('.loading')?.classList.add('done');
 setTimeout(() => document.querySelector('.loading')?.remove(), 700);
 
 // Dostęp z konsoli przeglądarki (debug)
-Object.assign(window as unknown as Record<string, unknown>, { falconSim: sim, falconSound: sound });
+Object.assign(window as unknown as Record<string, unknown>, { falconSim: sim, falconSound: sound, falconVoice: missionControl });

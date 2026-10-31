@@ -151,6 +151,8 @@ export class SoundEngine {
   private white: AudioBuffer | null = null;
   private main: EngineVoice | null = null;
   private booster: EngineVoice | null = null;
+  private engineBus: GainNode | null = null;
+  private voice: GainNode | null = null;
   private volume = 0.7;
   private muted = false;
 
@@ -204,10 +206,31 @@ export class SoundEngine {
       engineBus.gain.value = 0.8;
       engineBus.connect(this.master);
       engineBus.connect(this.reverb);
+      this.engineBus = engineBus;
+      // szyna komentarzy kontroli lotów (bez pogłosu, wspólna głośność i wyciszenie)
+      this.voice = ctx.createGain();
+      this.voice.gain.value = 0.9;
+      this.voice.connect(this.master);
       this.main = new EngineVoice(ctx, engineBus, brown, crackle);
       this.booster = new EngineVoice(ctx, engineBus, brown, crackle);
     }
     if (this.ctx.state === 'suspended') void this.ctx.resume();
+  }
+
+  /** AudioContext (null przed pierwszym gestem użytkownika). */
+  get context(): AudioContext | null {
+    return this.ctx;
+  }
+
+  /** Wejście dla komentarzy (null przed odblokowaniem dźwięku). */
+  get voiceBus(): GainNode | null {
+    return this.voice;
+  }
+
+  /** Ściszenie ryku silników o ~6 dB na czas wypowiedzi (ducking). */
+  duck(on: boolean) {
+    if (!this.ctx || !this.engineBus) return;
+    this.engineBus.gain.setTargetAtTime(on ? 0.4 : 0.8, this.ctx.currentTime, 0.15);
   }
 
   setVolume(v: number) {

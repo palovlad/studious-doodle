@@ -251,7 +251,8 @@ input[type='range'] {
 }
 .warp option { background: #111; }
 .hint { font-size: 10px; color: var(--hud-dim); text-align: center; }
-.seg-btn.mute { flex: 0 0 auto; width: 40px; margin-left: auto; padding: 4px 0; }
+.seg-btn.mute, .seg-btn.voice { flex: 0 0 auto; width: 40px; padding: 4px 0; }
+.seg-btn.voice { margin-left: auto; }
 input[type='range'].volume { width: 120px; margin: 0; accent-color: var(--accent); }
 
 .loading {

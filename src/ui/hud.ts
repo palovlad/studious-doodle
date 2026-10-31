@@ -18,6 +18,8 @@ export interface HudCallbacks {
   /** Głośność dźwięku 0..1. */
   onVolume(value: number): void;
   onMute(muted: boolean): void;
+  /** Komentarze kontroli lotów wł./wył. */
+  onVoice(enabled: boolean): void;
 }
 
 const CAMERA_LABELS: Record<CameraMode, string> = {
@@ -140,6 +142,8 @@ export class Hud {
   private muteBtn: HTMLButtonElement;
   private volume: HTMLInputElement;
   private muted = false;
+  private voiceBtn: HTMLButtonElement;
+  private voiceOn = true;
 
   constructor(parent: HTMLElement, private cb: HudCallbacks) {
     this.root = el('div', 'hud');
@@ -383,11 +387,14 @@ export class Hud {
       this.cb.onVolume(Number(this.volume.value) / 100);
       if (this.muted && Number(this.volume.value) > 0) this.toggleMute();
     };
-    warpRow.append(this.muteBtn, this.volume);
+    this.voiceBtn = el('button', 'seg-btn voice active', '🎧');
+    this.voiceBtn.title = 'Komentarz kontroli lotów wł./wył. (V)';
+    this.voiceBtn.onclick = () => this.toggleVoice();
+    warpRow.append(this.voiceBtn, this.muteBtn, this.volume);
     ctl.appendChild(warpRow);
 
     ctl.appendChild(
-      el('div', 'hint', 'Spacja: start · A: abort · R: reset · ↑/↓: ciąg · 1–6: kamera · M: dźwięk · mysz: obrót/zoom'),
+      el('div', 'hint', 'Spacja: start · A: abort · R: reset · ↑/↓: ciąg · 1–6: kamera · M: dźwięk · V: komentarz · mysz: obrót/zoom'),
     );
     this.root.appendChild(ctl);
 
@@ -426,6 +433,10 @@ export class Hud {
         case 'M':
           this.toggleMute();
           break;
+        case 'v':
+        case 'V':
+          this.toggleVoice();
+          break;
         case '1':
         case '2':
         case '3':
@@ -454,6 +465,18 @@ export class Hud {
     this.muteBtn.textContent = this.muted ? '🔇' : '🔊';
     this.muteBtn.classList.toggle('active', this.muted);
     this.cb.onMute(this.muted);
+  }
+
+  private toggleVoice() {
+    this.setVoiceState(!this.voiceOn);
+    this.cb.onVoice(this.voiceOn);
+  }
+
+  /** Stan przycisku komentarza (zapamiętany przez MissionControl). */
+  setVoiceState(on: boolean) {
+    this.voiceOn = on;
+    this.voiceBtn.classList.toggle('active', on);
+    this.voiceBtn.style.opacity = on ? '1' : '0.5';
   }
 
   /** Stan początkowy kontrolek dźwięku (zapamiętany przez silnik dźwięku). */
