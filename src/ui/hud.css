@@ -229,7 +229,7 @@ input[type='range'] {
 }
 
 .cam-row { display: flex; align-items: center; gap: 10px; }
-.seg { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; flex: 1; }
+.seg { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; flex: 1; }
 .seg-btn {
   font: inherit;
   font-size: 12px;
@@ -251,6 +251,8 @@ input[type='range'] {
 }
 .warp option { background: #111; }
 .hint { font-size: 10px; color: var(--hud-dim); text-align: center; }
+.seg-btn.mute { flex: 0 0 auto; width: 40px; margin-left: auto; padding: 4px 0; }
+input[type='range'].volume { width: 120px; margin: 0; accent-color: var(--accent); }
 
 .loading {
   position: fixed;
@@ -283,6 +285,8 @@ input[type='range'] {
   .booster-head { flex-wrap: wrap; gap: 4px; }
   .booster-status { font-size: 9px; }
   .recovery { gap: 8px; }
-  .seg-btn { font-size: 10px; }
+  .seg { grid-template-columns: repeat(3, 1fr); }
+  .seg-btn { font-size: 11px; }
+  input[type='range'].volume { width: 90px; }
   .hud-controls { bottom: 8px; padding: 10px; gap: 8px; }
 }

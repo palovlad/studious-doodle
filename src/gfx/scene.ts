@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { R_EARTH, type Vec2 } from '../sim/physics';
+import { Earth } from './earth';
 
 /**
  * Scena świata: Ziemia (kula + szczegółowa czasza wokół kosmodromu), stanowisko startowe,
@@ -55,64 +56,6 @@ function fbm(x: number, y: number, seed: number, octaves = 5): number {
     f *= 2;
   }
   return s;
-}
-
-/** Tekstura globu (equirectangular) z proceduralnymi kontynentami i chmurami. */
-function makeGlobeTexture(): THREE.Texture {
-  const w = 1024;
-  const h = 512;
-  const c = document.createElement('canvas');
-  c.width = w;
-  c.height = h;
-  const g = c.getContext('2d')!;
-  const img = g.createImageData(w, h);
-  for (let y = 0; y < h; y++) {
-    const lat = Math.abs(y / h - 0.5) * 2; // 0 równik, 1 biegun (tu: daleko od kosmodromu)
-    for (let x = 0; x < w; x++) {
-      // zawijanie szumu w poziomie
-      const ang = (x / w) * Math.PI * 2;
-      const nx = Math.cos(ang) * 2.2 + 10;
-      const nz = Math.sin(ang) * 2.2 + 10;
-      const ny = (y / h) * 4.4;
-      let n = fbm(nx + ny * 0.3, nz + ny, 3, 6);
-      const nearPad = 1 - THREE.MathUtils.smoothstep(y / h, 0.05, 0.16);
-      if (nearPad > 0) {
-        // u = 0.5 to kierunek +X (wschód, ocean), u = 0/1 to zachód (ląd)
-        const westness = Math.cos(ang) * 0.5 + 0.5;
-        const local = westness > 0.42 + (n - 0.5) * 0.4 ? 0.62 : 0.3;
-        n = n * (1 - nearPad) + local * nearPad;
-      }
-      const cloud = fbm(nx * 2.5 + 40, nz * 2.5 + ny * 2, 9, 5);
-      let r: number, gg: number, b: number;
-      if (n > 0.53) {
-        const k = (n - 0.53) * 4;
-        r = 70 + k * 90;
-        gg = 105 + k * 40;
-        b = 55 + k * 20;
-        if (lat > 0.85 && y > h / 2) {
-          r = gg = b = 235; // czapa lodowa tylko na biegunie przeciwległym do kosmodromu
-        }
-      } else {
-        const k = n / 0.53;
-        r = 10 + k * 20;
-        gg = 40 + k * 50;
-        b = 95 + k * 70;
-      }
-      const cl = Math.max(0, (cloud - 0.55) * 3.2) * THREE.MathUtils.smoothstep(y / h, 0.04, 0.2);
-      r = r + (255 - r) * Math.min(1, cl);
-      gg = gg + (255 - gg) * Math.min(1, cl);
-      b = b + (255 - b) * Math.min(1, cl);
-      const i = (y * w + x) * 4;
-      img.data[i] = r;
-      img.data[i + 1] = gg;
-      img.data[i + 2] = b;
-      img.data[i + 3] = 255;
-    }
-  }
-  g.putImageData(img, 0, 0);
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
 }
 
 /** Linia brzegowa (x w metrach) w funkcji współrzędnej z — wybrzeże na wschód od stanowiska. */
@@ -178,6 +121,22 @@ function makeRegionTexture(sizeMeters: number): THREE.Texture {
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 8;
   return tex;
+}
+
+/** Maska alfa czaszy regionu: pełne krycie w środku, zanik przy krawędzi koła. */
+function makeEdgeFadeTexture(): THREE.Texture {
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const g = c.getContext('2d')!;
+  const grd = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+  grd.addColorStop(0, '#ffffff');
+  grd.addColorStop(0.72, '#ffffff');
+  grd.addColorStop(0.98, '#000000');
+  g.fillStyle = '#000000';
+  g.fillRect(0, 0, 256, 256);
+  g.fillStyle = grd;
+  g.fillRect(0, 0, 256, 256);
+  return new THREE.CanvasTexture(c);
 }
 
 function makeGrassTexture(): THREE.Texture {
@@ -261,10 +220,18 @@ const ATMO_FRAG = /* glsl */ `
     vec3 closest = uCamRel + dir * max(tc, 0.0);
     float d = length(closest);
     float glow;
-    if (d < uR) glow = 0.18;
-    else glow = pow(clamp(1.0 - (d - uR) / uThickness, 0.0, 1.0), 2.2);
-    float lit = 0.35 + 0.65 * clamp(dot(normalize(closest), uSun) + 0.3, 0.0, 1.0);
-    vec3 col = vec3(0.35, 0.6, 1.0) * glow * lit * uStrength;
+    if (d < uR) glow = 0.12;
+    else glow = pow(clamp(1.0 - (d - uR) / uThickness, 0.0, 1.0), 1.8);
+    // kolor rozpraszania zależny od kąta słońca: błękit po dziennej stronie,
+    // pomarańczowo-czerwony pas przy terminatorze, ciemność po nocnej
+    float sunAng = dot(normalize(closest), uSun);
+    float lit = smoothstep(-0.3, 0.15, sunAng);
+    vec3 dayCol = vec3(0.32, 0.58, 1.0);
+    vec3 duskCol = vec3(1.0, 0.42, 0.14);
+    vec3 col = mix(duskCol, dayCol, smoothstep(-0.05, 0.35, sunAng));
+    // jaśniejsza, cienka krawędź tuż nad powierzchnią
+    float edge = d > uR ? pow(clamp(1.0 - (d - uR) / (uThickness * 0.25), 0.0, 1.0), 3.0) : 0.0;
+    col = col * glow * lit * uStrength + vec3(0.6, 0.8, 1.0) * edge * lit * uStrength * 0.6;
     gl_FragColor = vec4(col, 1.0);
   }
 `;
@@ -458,6 +425,8 @@ export class World {
   private atmo: THREE.Mesh;
   private atmoMat: THREE.ShaderMaterial;
   private fog: THREE.FogExp2;
+  private earth: Earth;
+  private clock = new THREE.Timer();
   private tmp = new THREE.Vector3();
   private horizonDay = new THREE.Color(0.72, 0.84, 0.96);
   private horizonSpace = new THREE.Color(0.02, 0.03, 0.06);
@@ -530,15 +499,9 @@ export class World {
     scene.add(this.stars);
 
     // --- Ziemia ---
-    // Kula globalna (nieco mniejsza, by nie kolidować z czaszą szczegółową)
-    const globeGeo = new THREE.SphereGeometry(R_EARTH - 40, 256, 128);
-    globeGeo.translate(0, -R_EARTH, 0);
-    const globe = new THREE.Mesh(
-      globeGeo,
-      new THREE.MeshStandardMaterial({ map: makeGlobeTexture(), roughness: 0.9, metalness: 0 }),
-    );
-    globe.name = 'Globe';
-    scene.add(globe);
+    // Proceduralny glob (shader GPU) + warstwa chmur; nieco mniejszy niż czasza szczegółowa
+    this.earth = new Earth(this.sunDir);
+    scene.add(this.earth.group);
 
     // Czasza szczegółowa wokół kosmodromu (~320 km promienia), tekstura planarna
     const capAngle = 0.05;
@@ -553,7 +516,13 @@ export class World {
     uv.needsUpdate = true;
     const cap = new THREE.Mesh(
       capGeo,
-      new THREE.MeshStandardMaterial({ map: makeRegionTexture(regionSize), roughness: 0.92 }),
+      new THREE.MeshStandardMaterial({
+        map: makeRegionTexture(regionSize),
+        roughness: 0.92,
+        // krawędź czaszy płynnie przechodzi w proceduralny glob
+        alphaMap: makeEdgeFadeTexture(),
+        transparent: true,
+      }),
     );
     cap.receiveShadow = true;
     cap.name = 'RegionCap';
@@ -615,6 +584,10 @@ export class World {
     // Światło rozproszone nieba słabnie w próżni
     this.hemi.intensity = 0.9 * (1 - space) + 0.15;
     this.sun.intensity = 2.8 + space * 0.6;
+
+    // Ziemia: mgła taka sama jak dla reszty sceny, dryf chmur w czasie
+    this.clock.update();
+    this.earth.update(this.clock.getElapsed(), alt, this.fog.color, this.fog.density);
 
     this.atmoMat.uniforms.uCamRel.value.copy(rel);
     this.atmoMat.uniforms.uStrength.value = THREE.MathUtils.smoothstep(alt, 40_000, 140_000) * 1.4;

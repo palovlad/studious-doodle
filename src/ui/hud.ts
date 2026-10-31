@@ -2,7 +2,7 @@ import './hud.css';
 import type { BoosterPhase, FlightEvent, FlightPhase, SimState } from '../sim/physics';
 import { DEFAULT_GUIDANCE, VEHICLE } from '../sim/physics';
 
-export type CameraMode = 'chase' | 'onboard' | 'ground' | 'wide' | 'booster';
+export type CameraMode = 'chase' | 'onboard' | 'ground' | 'wide' | 'booster' | 'earth';
 
 export interface HudCallbacks {
   onLaunch(): void;
@@ -15,6 +15,9 @@ export interface HudCallbacks {
   onBoosterReserve(fraction: number): void;
   /** Planowany ciąg landing burn [0.4..1]. */
   onLandingThrottle(value: number): void;
+  /** Głośność dźwięku 0..1. */
+  onVolume(value: number): void;
+  onMute(muted: boolean): void;
 }
 
 const CAMERA_LABELS: Record<CameraMode, string> = {
@@ -23,6 +26,7 @@ const CAMERA_LABELS: Record<CameraMode, string> = {
   ground: 'Naziemna',
   wide: 'Panorama',
   booster: 'Booster',
+  earth: 'Ziemia',
 };
 
 const BOOSTER_PHASE_LABELS: Record<BoosterPhase, string> = {
@@ -133,6 +137,9 @@ export class Hud {
   private reserveLabel: HTMLElement;
   private landingThrottle: HTMLInputElement;
   private landingThrottleLabel: HTMLElement;
+  private muteBtn: HTMLButtonElement;
+  private volume: HTMLInputElement;
+  private muted = false;
 
   constructor(parent: HTMLElement, private cb: HudCallbacks) {
     this.root = el('div', 'hud');
@@ -361,10 +368,26 @@ export class Hud {
     }
     this.warpSelect.onchange = () => this.cb.onWarp(Number(this.warpSelect.value));
     warpRow.appendChild(this.warpSelect);
+    // dźwięk: wyciszenie + głośność
+    this.muteBtn = el('button', 'seg-btn mute', '🔊');
+    this.muteBtn.title = 'Wycisz / włącz dźwięk (M)';
+    this.muteBtn.onclick = () => this.toggleMute();
+    this.volume = el('input', 'volume');
+    this.volume.type = 'range';
+    this.volume.min = '0';
+    this.volume.max = '100';
+    this.volume.step = '1';
+    this.volume.value = '70';
+    this.volume.title = 'Głośność';
+    this.volume.oninput = () => {
+      this.cb.onVolume(Number(this.volume.value) / 100);
+      if (this.muted && Number(this.volume.value) > 0) this.toggleMute();
+    };
+    warpRow.append(this.muteBtn, this.volume);
     ctl.appendChild(warpRow);
 
     ctl.appendChild(
-      el('div', 'hint', 'Spacja: start · A: abort · R: reset · ↑/↓: ciąg · 1–5: kamera · mysz: obrót/zoom'),
+      el('div', 'hint', 'Spacja: start · A: abort · R: reset · ↑/↓: ciąg · 1–6: kamera · M: dźwięk · mysz: obrót/zoom'),
     );
     this.root.appendChild(ctl);
 
@@ -399,11 +422,16 @@ export class Hud {
           e.preventDefault();
           this.nudgeThrottle(-5);
           break;
+        case 'm':
+        case 'M':
+          this.toggleMute();
+          break;
         case '1':
         case '2':
         case '3':
         case '4':
-        case '5': {
+        case '5':
+        case '6': {
           const m = modes[Number(e.key) - 1];
           this.setCamera(m);
           this.cb.onCamera(m);
@@ -419,6 +447,21 @@ export class Hud {
     const v = Math.min(100, Math.max(VEHICLE.minThrottle * 100, Number(this.throttle.value) + d));
     this.throttle.value = String(v);
     this.throttle.dispatchEvent(new Event('input'));
+  }
+
+  private toggleMute() {
+    this.muted = !this.muted;
+    this.muteBtn.textContent = this.muted ? '🔇' : '🔊';
+    this.muteBtn.classList.toggle('active', this.muted);
+    this.cb.onMute(this.muted);
+  }
+
+  /** Stan początkowy kontrolek dźwięku (zapamiętany przez silnik dźwięku). */
+  setAudioState(volume: number, muted: boolean) {
+    this.volume.value = String(Math.round(volume * 100));
+    this.muted = muted;
+    this.muteBtn.textContent = muted ? '🔇' : '🔊';
+    this.muteBtn.classList.toggle('active', muted);
   }
 
   private updateReserveLabel(pct: number) {

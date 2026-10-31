@@ -28,7 +28,8 @@ Każdy push na `main` buduje projekt i publikuje go na GitHub Pages
 | Przerwanie lotu | **ABORT** / `A` |
 | Reset | **RESET** / `R` |
 | Przepustnica (40–100%) | suwak / `↑` `↓` |
-| Kamera: pościg, pokładowa, naziemna, panorama, booster | przyciski / `1`–`5` |
+| Kamera: pościg, pokładowa, naziemna, panorama, booster, Ziemia | przyciski / `1`–`6` |
+| Dźwięk: wyciszenie / głośność | 🔊 i suwak / `M` |
 | Rezerwa paliwa I stopnia na powrót (0–15%, do MECO) | suwak „Rezerwa paliwa I st.” |
 | Planowany ciąg landing burn (40–100%) | suwak „Ciąg lądowania” |
 | Przyspieszenie czasu | lista „Czas” (×1 … ×50) |
@@ -43,7 +44,9 @@ src/
 ├── gfx/rocket.ts      # proceduralny model Falcon 9
 ├── gfx/particles.ts   # ogień i spaliny (systemy cząsteczek)
 ├── gfx/droneship.ts   # barka lądowiskowa na oceanie
-├── gfx/scene.ts       # Ziemia, stanowisko startowe, światło, niebo
+├── gfx/earth.ts       # proceduralna Ziemia (shader GPU) i warstwa chmur
+├── gfx/scene.ts       # stanowisko startowe, światło, niebo, atmosfera
+├── audio/sfx.ts       # proceduralne dźwięki (Web Audio API)
 └── ui/hud.ts (+ .css) # telemetria i panel sterowania
 ```
 
@@ -91,7 +94,25 @@ stopień ląduje z ~2 t paliwa.
 - Autonomiczna barka lądowiskowa: pokład z oznaczeniem celu, ściany osłonowe i pędniki. Płomień przy lądowaniu rozpływa się po pokładzie.
 - Cząsteczki: płomień (rozszerza się w próżni), dym zostający w powietrzu, odbicie płomienia od stołu startowego i chmury pary.
 - Niebo: shader gradientu zależny od wysokości — błękit przechodzi w czerń kosmosu, pojawiają się gwiazdy i poświata atmosfery na horyzoncie.
+- Ziemia liczona w shaderze GPU z szumu 3D:
+  - kontynenty i biomy (lasy, pustynie, tundra, lód),
+  - głębia oceanu i odblask słońca na wodzie,
+  - rzeźba terenu, łuna terminatora i światła miast po nocnej stronie,
+  - warstwa chmur z cieniami.
+  Detal dopasowuje się do rozdzielczości ekranu, a linie brzegowe są wygładzone.
+- Kamera „Ziemia”: widok na horyzont i krzywiznę Ziemi zza II stopnia.
 - Logarytmiczny bufor głębi pozwala renderować jednocześnie stanowisko (metry) i całą Ziemię (tysiące km).
+
+### Dźwięk
+Wszystkie dźwięki są syntezowane w przeglądarce (Web Audio API, bez plików).
+Dźwięk włącza się po pierwszym kliknięciu albo naciśnięciu klawisza.
+- **Ryk silników**:
+  - głośność rośnie z ciągiem i liczbą silników,
+  - zależy od gęstości powietrza: w próżni z kamer zewnętrznych jest cicho, a w kamerze pokładowej słychać stłumiony rumor konstrukcji,
+  - cichnie z odległością kamery, a w kamerze naziemnej dociera z opóźnieniem jak prawdziwy dźwięk (343 m/s),
+  - powracający I stopień ma osobny dźwięk.
+- **Wybuch**: przy zderzeniu z ziemią i nieudanym lądowaniu (huk, niski „thump”, pogłos).
+- **Drobne efekty**: syk pneumatyki przy separacji i zrzucie owiewki, „klik” zapłonu silników.
 
 ## Licencja
 

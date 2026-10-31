@@ -13,6 +13,7 @@ import { FalconRocket } from './gfx/rocket';
 import { ExhaustSystem, type Emitter } from './gfx/particles';
 import { World, EARTH_CENTER, simToWorld } from './gfx/scene';
 import { DroneShip } from './gfx/droneship';
+import { SoundEngine, SPEED_OF_SOUND } from './audio/sfx';
 import { Hud, type CameraMode } from './ui/hud';
 
 // ---------------------------------------------------------------------------
@@ -96,6 +97,11 @@ const flameLight = new THREE.PointLight(0xffa04a, 0, 0, 2);
 scene.add(flameLight);
 
 const sim = new FlightSim();
+const sound = new SoundEngine();
+// AudioContext można utworzyć dopiero po geście użytkownika (polityka autoplay)
+for (const ev of ['pointerdown', 'keydown', 'touchstart'] as const) {
+  window.addEventListener(ev, () => sound.unlock(), { passive: true });
+}
 let warp = 1;
 let cameraMode: CameraMode = 'chase';
 let stage1Detached = false;
@@ -118,7 +124,10 @@ const hud = new Hud(document.body, {
   onWarp: (w) => (warp = w),
   onBoosterReserve: (f) => sim.setBoosterReserve(f),
   onLandingThrottle: (v) => sim.setLandingThrottle(v),
+  onVolume: (v) => sound.setVolume(v),
+  onMute: (m) => sound.setMuted(m),
 });
+hud.setAudioState(sound.state.volume, sound.state.muted);
 
 sim.on(handleEvent);
 
@@ -143,6 +152,7 @@ function handleEvent(ev: FlightEvent, t: number) {
   }
   if (ev === 'LANDING_BURN') detail = `${s.booster.engines} ${s.booster.engines === 1 ? 'silnik' : 'silniki'}`;
   hud.event(ev, t, detail);
+  playEventSound(ev);
   switch (ev) {
     case 'STAGE_SEP':
       rocket.detachStage1(scene);
@@ -175,6 +185,41 @@ function handleEvent(ev: FlightEvent, t: number) {
       const at = rocket.stage1.position.clone().add(tmpV.set(axis.x * 12, axis.y * 12, 0));
       boosterExhaust.burst(at, 1.6);
       rocket.stage1.visible = false;
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+/** Odległość kamery od punktu i opóźnienie dźwięku (tylko kamera naziemna). */
+function hearing(at: THREE.Vector3): { distance: number; delay: number } {
+  const distance = camera.position.distanceTo(at);
+  return { distance, delay: cameraMode === 'ground' ? distance / SPEED_OF_SOUND : 0 };
+}
+
+function playEventSound(ev: FlightEvent) {
+  switch (ev) {
+    case 'IGNITION':
+      sound.ignition(0.7);
+      break;
+    case 'SES1':
+    case 'ENTRY_BURN':
+    case 'LANDING_BURN':
+      sound.ignition(0.35);
+      break;
+    case 'STAGE_SEP':
+    case 'FAIRING_SEP':
+      sound.hiss(0.6);
+      break;
+    case 'IMPACT': {
+      const h = hearing(rocket.group.position);
+      sound.explosion(h.distance, h.delay, 1.6);
+      break;
+    }
+    case 'LANDING_FAIL': {
+      const h = hearing(rocket.stage1.position);
+      sound.explosion(h.distance, h.delay, 1.2);
       break;
     }
     default:
@@ -272,6 +317,25 @@ function updateCamera(dt: number) {
       camera.lookAt(look);
       if (camera.fov !== 75) {
         camera.fov = 75;
+        camera.updateProjectionMatrix();
+      }
+      break;
+    }
+    case 'earth': {
+      // widok Ziemi z rakiety: kamera tuż za II stopniem, patrzy przed siebie i lekko w dół,
+      // tak by horyzont i krzywizna Ziemi wypełniały kadr, a rakieta była na pierwszym planie
+      const { east } = localFrame(sim.state.pos);
+      const eastV = new THREE.Vector3(east.x, east.y, 0);
+      const side = new THREE.Vector3(0, 0, 1);
+      const alt = Math.max(0, sim.state.telemetry.altitude);
+      const dip = Math.acos(R_EARTH / (R_EARTH + alt));
+      const look = dip * 0.85 + THREE.MathUtils.degToRad(7);
+      camera.position.copy(focus).addScaledVector(eastV, -150).addScaledVector(side, 55).addScaledVector(up, 22);
+      const dir = eastV.multiplyScalar(Math.cos(look)).addScaledVector(up, -Math.sin(look));
+      camera.up.copy(up);
+      camera.lookAt(tmpV2.copy(camera.position).addScaledVector(dir, 1000));
+      if (camera.fov !== 62) {
+        camera.fov = 62;
         camera.updateProjectionMatrix();
       }
       break;
@@ -416,6 +480,39 @@ function updateBoosterExhaust(realDt: number, burning: boolean) {
   });
 }
 
+/** Ryk silników: II stopień/całość oraz osobno powracający I stopień. */
+function updateSound() {
+  const s = sim.state;
+  const b = s.booster;
+  const mainThrust = rocketDestroyed ? 0 : s.telemetry.thrustFraction * (s.throttle > 0 ? 1 : 0);
+  const boosterThrust =
+    stage1Detached && rocket.stage1.visible && b.engines > 0 ? b.throttle : 0;
+  const mainHear = hearing(rocket.group.position);
+  const boosterHear = hearing(rocket.stage1.position);
+  const boosterAlt = Math.hypot(b.pos.x, b.pos.y) - R_EARTH;
+  const boosterCam = cameraMode === 'booster';
+  sound.update(
+    {
+      thrust: mainThrust,
+      engines: s.stage === 1 ? 9 : 4,
+      airRatio: s.telemetry.airDensity / 1.225,
+      distance: mainHear.distance,
+      onboard: cameraMode === 'onboard',
+      delay: mainHear.delay,
+      emphasis: boosterCam ? 0.35 : 1,
+    },
+    {
+      thrust: boosterThrust,
+      engines: b.engines,
+      airRatio: airDensity(boosterAlt) / 1.225,
+      distance: boosterHear.distance,
+      onboard: false,
+      delay: boosterHear.delay,
+      emphasis: boosterCam ? 1 : 0.8,
+    },
+  );
+}
+
 function updateMarker() {
   const target = rocketDestroyed ? null : rocket.group;
   if (!target) {
@@ -455,6 +552,7 @@ function frame(time: number) {
   syncGraphics(realDt);
   updateCamera(realDt);
   updateMarker();
+  updateSound();
   world.update(camera, focus);
   exhaust.setViewport(renderer.domElement.height, camera.fov);
   hud.update(sim.state, realDt);
@@ -466,4 +564,4 @@ document.querySelector('.loading')?.classList.add('done');
 setTimeout(() => document.querySelector('.loading')?.remove(), 700);
 
 // Dostęp z konsoli przeglądarki (debug)
-Object.assign(window as unknown as Record<string, unknown>, { falconSim: sim });
+Object.assign(window as unknown as Record<string, unknown>, { falconSim: sim, falconSound: sound });
