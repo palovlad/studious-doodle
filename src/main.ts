@@ -221,6 +221,10 @@ function handleEvent(ev: FlightEvent, t: number) {
   }
 }
 
+// kilka wspólnych kształtów odłamków (wycinki poszycia o jednostkowej długości, skalowane w osi Y)
+const fragmentGeos = [0.5, 0.9, 1.4].map(
+  (arc) => new THREE.CylinderGeometry(1.83, 1.83, 1, 6, 1, true, 0, arc),
+);
 const fragmentMats = [
   new THREE.MeshStandardMaterial({ color: 0xe8e9ec, roughness: 0.55, metalness: 0.1, side: THREE.DoubleSide }),
   new THREE.MeshStandardMaterial({ color: 0x3a3632, roughness: 0.9, metalness: 0.1, side: THREE.DoubleSide }),
@@ -256,13 +260,12 @@ function terminateVehicle() {
   const to = ROCKET_HEIGHT - 4;
   const count = stage1Detached ? 14 : 28;
   for (let i = 0; i < count; i++) {
-    const len = 2 + Math.random() * 6;
-    const arc = 0.4 + Math.random() * 1.4;
-    const geo = new THREE.CylinderGeometry(1.83, 1.83, len, 6, 1, true, Math.random() * Math.PI * 2, arc);
-    const mesh = new THREE.Mesh(geo, fragmentMats[i % fragmentMats.length]);
+    const mesh = new THREE.Mesh(fragmentGeos[i % fragmentGeos.length], fragmentMats[i % fragmentMats.length]);
+    mesh.scale.y = 2 + Math.random() * 6;
     const along = from + Math.random() * (to - from);
     mesh.position.copy(rocket.group.position).addScaledVector(axisV, along);
     mesh.quaternion.copy(rocket.group.quaternion);
+    mesh.rotateY(Math.random() * Math.PI * 2);
     scene.add(mesh);
     // rozrzut głównie na boki od osi (ładunki tną zbiorniki wzdłużnie)
     const dir = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5);
@@ -359,6 +362,8 @@ function computeFocus(out: THREE.Vector3): THREE.Vector3 {
 function setCameraMode(m: CameraMode, force = false) {
   const changed = m !== cameraMode;
   cameraMode = m;
+  // ręczna zmiana kamery kończy automatyczne odsuwanie po FTS
+  if (changed) cameraPullback = 0;
   hud.setCamera(m);
   computeFocus(focus);
   prevFocus.copy(focus);
@@ -556,7 +561,6 @@ function syncGraphics(realDt: number) {
     d.obj.rotateOnWorldAxis(tmpV2.copy(d.spin).normalize(), d.spin.length() * simDt);
     const underground = d.obj.position.distanceTo(EARTH_CENTER) < R_EARTH;
     if (d.age > (d.drag ? 90 : 40) || underground) {
-      if (d.drag && d.obj instanceof THREE.Mesh) d.obj.geometry.dispose();
       scene.remove(d.obj);
       debris.splice(i, 1);
     }

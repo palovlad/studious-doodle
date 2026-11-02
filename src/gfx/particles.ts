@@ -252,7 +252,6 @@ export class ExhaustSystem {
     this.fire.points.position.copy(next);
   }
 
-  /** Wybuch (np. uderzenie w ziemię). */
   /** Wybuch. `spherical` — kula ognia we wszystkich kierunkach (w powietrzu), domyślnie półkula nad ziemią. */
   burst(at: THREE.Vector3, scale = 1, spherical = false) {
     for (let i = 0; i < 600 * scale; i++) {

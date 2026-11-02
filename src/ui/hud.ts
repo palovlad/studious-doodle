@@ -1,6 +1,6 @@
 import './hud.css';
 import type { BoosterPhase, FlightEvent, FlightPhase, SimState } from '../sim/physics';
-import { DEFAULT_GUIDANCE, VEHICLE } from '../sim/physics';
+import { DEFAULT_GUIDANCE, VEHICLE, canAbort, canTerminate } from '../sim/physics';
 
 export type CameraMode = 'chase' | 'onboard' | 'ground' | 'wide' | 'booster' | 'earth';
 
@@ -607,12 +607,14 @@ export class Hud {
 
     const flying = s.phase !== 'PRELAUNCH' && s.phase !== 'SCRUBBED';
     this.launchBtn.disabled = s.phase !== 'PRELAUNCH';
-    this.setAbortMode(s.phase === 'ABORT' || s.phase === 'TERMINATED' ? 'fts' : 'abort');
-    this.abortBtn.disabled = !['IGNITION', 'ASCENT', 'COAST', 'STAGE2', 'ABORT'].includes(s.phase);
+    // po przerwaniu lotu przycisk zostaje „NEUTRALIZUJ” aż do resetu (także po zderzeniu z ziemią)
+    const aborted = s.phase === 'ABORT' || s.phase === 'TERMINATED' || (s.phase === 'IMPACT' && this.abortMode === 'fts');
+    this.setAbortMode(aborted ? 'fts' : 'abort');
+    this.abortBtn.disabled = aborted ? !canTerminate(s.phase) : !canAbort(s.phase);
     this.resetBtn.disabled = !flying && s.phase !== 'SCRUBBED';
 
     // ślad trajektorii
-    if (flying && s.t > 0 && s.t - this.lastTrackT > 0.5) {
+    if (flying && s.phase !== 'TERMINATED' && s.t > 0 && s.t - this.lastTrackT > 0.5) {
       this.track.push({ x: T.downrange, y: T.altitude });
       this.lastTrackT = s.t;
       if (this.track.length > 2000) this.track.splice(0, this.track.length - 2000);

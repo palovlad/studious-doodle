@@ -59,6 +59,12 @@ export type FlightPhase =
   | 'IMPACT'
   | 'TERMINATED'; // neutralizacja ładunkami FTS po przerwaniu lotu
 
+/** Fazy, w których można przerwać lot (w IGNITION oznacza to wstrzymanie startu). */
+const ABORTABLE: readonly FlightPhase[] = ['IGNITION', 'ASCENT', 'COAST', 'STAGE2'];
+export const canAbort = (phase: FlightPhase): boolean => ABORTABLE.includes(phase);
+/** Neutralizacja (FTS) jest możliwa tylko po przerwaniu lotu, zanim pojazd uderzy w ziemię. */
+export const canTerminate = (phase: FlightPhase): boolean => phase === 'ABORT';
+
 export type FlightEvent =
   | 'IGNITION'
   | 'LIFTOFF'
@@ -382,7 +388,7 @@ export class FlightSim {
       this.emit('SCRUB');
       return true;
     }
-    if (s.phase === 'ASCENT' || s.phase === 'STAGE2' || s.phase === 'COAST') {
+    if (canAbort(s.phase)) {
       s.enginesOn = false;
       s.phase = 'ABORT';
       this.emit('ABORT');
@@ -398,10 +404,15 @@ export class FlightSim {
    */
   terminate(): boolean {
     const s = this.state;
-    if (s.phase !== 'ABORT') return false;
+    if (!canTerminate(s.phase)) return false;
     s.phase = 'TERMINATED';
     s.enginesOn = false;
     s.throttle = 0;
+    // pojazd przestał istnieć: telemetria zostaje na ostatniej wysokości, bez ruchu i orbity
+    this.updateTelemetry(0, 0);
+    const tel = s.telemetry;
+    tel.speed = tel.verticalSpeed = tel.horizontalSpeed = tel.mach = tel.dynamicPressure = 0;
+    tel.apoapsis = tel.periapsis = 0;
     this.emit('FTS');
     return true;
   }
@@ -457,7 +468,6 @@ export class FlightSim {
     // po neutralizacji pojazdu zostaje tylko ewentualny I stopień w locie powrotnym
     if (s.phase === 'TERMINATED') {
       this.updateBooster(dt);
-      this.updateTelemetry(0, 0);
       return;
     }
 
