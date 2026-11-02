@@ -253,10 +253,13 @@ export class ExhaustSystem {
   }
 
   /** Wybuch (np. uderzenie w ziemię). */
-  burst(at: THREE.Vector3, scale = 1) {
+  /** Wybuch. `spherical` — kula ognia we wszystkich kierunkach (w powietrzu), domyślnie półkula nad ziemią. */
+  burst(at: THREE.Vector3, scale = 1, spherical = false) {
     for (let i = 0; i < 600 * scale; i++) {
-      tmpV.set(Math.random() - 0.5, Math.random() * 0.8, Math.random() - 0.5).normalize();
-      tmpV.multiplyScalar(40 + Math.random() * 120 * scale);
+      if (spherical) tmpV.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+      else tmpV.set(Math.random() - 0.5, Math.random() * 0.8, Math.random() - 0.5).normalize();
+      // w powietrzu kula ognia jest zwarta (bez odbicia od ziemi, które ją spłaszcza i rozlewa)
+      tmpV.multiplyScalar(spherical ? 20 + Math.random() * 55 * scale : 40 + Math.random() * 120 * scale);
       tmpP.copy(at).sub(this.anchor);
       this.fire.spawn(tmpP, tmpV, 0.6 + Math.random() * 1.2, 6 * scale, 18 * scale, 1.5, 1);
     }

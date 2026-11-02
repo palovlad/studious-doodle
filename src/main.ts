@@ -9,7 +9,7 @@ import {
   type FlightEvent,
   type Vec2,
 } from './sim/physics';
-import { FalconRocket } from './gfx/rocket';
+import { FalconRocket, STAGE1_TOP, ROCKET_HEIGHT } from './gfx/rocket';
 import { ExhaustSystem, type Emitter } from './gfx/particles';
 import { World, EARTH_CENTER, simToWorld } from './gfx/scene';
 import { DroneShip } from './gfx/droneship';
@@ -96,6 +96,12 @@ scene.add(marker);
 // Poświata płomienia oświetlająca stanowisko i kadłub
 const flameLight = new THREE.PointLight(0xffa04a, 0, 0, 2);
 scene.add(flameLight);
+// błysk wybuchu (FTS)
+const flashLight = new THREE.PointLight(0xffc27a, 0, 0, 2);
+scene.add(flashLight);
+let flashTime = 0;
+/** Po FTS kamera pościgowa płynnie odsuwa się na tę odległość [m] (0 = wyłączone). */
+let cameraPullback = 0;
 
 const sim = new FlightSim();
 const sound = new SoundEngine();
@@ -125,12 +131,15 @@ interface Debris {
   vel: THREE.Vector3;
   spin: THREE.Vector3;
   age: number;
+  /** Hamowanie aerodynamiczne odłamków [1/s przy gęstości z poziomu morza]; 0 = brak. */
+  drag?: number;
 }
 const debris: Debris[] = [];
 
 const hud = new Hud(document.body, {
   onLaunch: () => sim.launch(),
   onAbort: () => sim.abort(),
+  onTerminate: () => sim.terminate(),
   onReset: () => resetAll(),
   onThrottle: (v) => sim.setThrottle(v),
   onCamera: (m) => setCameraMode(m),
@@ -165,6 +174,7 @@ function handleEvent(ev: FlightEvent, t: number) {
     const b = s.booster;
     detail = `${b.touchdownVertical.toFixed(1)} m/s, ${b.touchdownMiss.toFixed(0)} m od środka, zostało ${(b.prop / 1000).toFixed(1)} t paliwa`;
   }
+  if (ev === 'ABORT') detail = 'NEUTRALIZUJ (A) zniszczy rakietę ładunkami FTS';
   if (ev === 'LANDING_BURN') detail = `${s.booster.engines} ${s.booster.engines === 1 ? 'silnik' : 'silniki'}`;
   hud.event(ev, t, detail);
   playEventSound(ev);
@@ -194,6 +204,9 @@ function handleEvent(ev: FlightEvent, t: number) {
       rocket.group.visible = false;
       rocketDestroyed = true;
       break;
+    case 'FTS':
+      terminateVehicle();
+      break;
     case 'LANDING_FAIL': {
       // wybuch w środku zbiorników I stopnia
       const b = s.booster;
@@ -206,6 +219,63 @@ function handleEvent(ev: FlightEvent, t: number) {
     default:
       break;
   }
+}
+
+const fragmentMats = [
+  new THREE.MeshStandardMaterial({ color: 0xe8e9ec, roughness: 0.55, metalness: 0.1, side: THREE.DoubleSide }),
+  new THREE.MeshStandardMaterial({ color: 0x3a3632, roughness: 0.9, metalness: 0.1, side: THREE.DoubleSide }),
+  new THREE.MeshStandardMaterial({ color: 0x15161a, roughness: 0.7, metalness: 0.3, side: THREE.DoubleSide }),
+];
+
+/** Środek wybuchu FTS na osi pojazdu (cała rakieta albo sam II stopień). */
+function vehicleCenter(out: THREE.Vector3): THREE.Vector3 {
+  const s = sim.state;
+  const axis = attitudeVector(s.pos, s.pitch);
+  const along = stage1Detached ? (STAGE1_TOP + ROCKET_HEIGHT) / 2 : 30;
+  return out.copy(rocket.group.position).add(tmpV.set(axis.x * along, axis.y * along, 0));
+}
+
+/**
+ * Neutralizacja (FTS): ładunki rozcinają zbiorniki wzdłuż kadłuba — kula ognia, błysk
+ * i rozrzucone fragmenty poszycia, które dalej lecą balistycznie z prędkością pojazdu.
+ */
+function terminateVehicle() {
+  const s = sim.state;
+  rocket.group.updateMatrixWorld(true);
+  const center = vehicleCenter(new THREE.Vector3());
+  const air = s.telemetry.airDensity / 1.225;
+  exhaust.burst(center, stage1Detached ? 1.4 : 2.2, true);
+  flashLight.position.copy(center);
+  flashTime = 1;
+  if (cameraMode === 'onboard') setCameraMode('chase');
+  if (cameraMode === 'chase') cameraPullback = stage1Detached ? 380 : 520;
+
+  const axis = attitudeVector(s.pos, s.pitch);
+  const axisV = new THREE.Vector3(axis.x, axis.y, 0);
+  const from = stage1Detached ? STAGE1_TOP : 2;
+  const to = ROCKET_HEIGHT - 4;
+  const count = stage1Detached ? 14 : 28;
+  for (let i = 0; i < count; i++) {
+    const len = 2 + Math.random() * 6;
+    const arc = 0.4 + Math.random() * 1.4;
+    const geo = new THREE.CylinderGeometry(1.83, 1.83, len, 6, 1, true, Math.random() * Math.PI * 2, arc);
+    const mesh = new THREE.Mesh(geo, fragmentMats[i % fragmentMats.length]);
+    const along = from + Math.random() * (to - from);
+    mesh.position.copy(rocket.group.position).addScaledVector(axisV, along);
+    mesh.quaternion.copy(rocket.group.quaternion);
+    scene.add(mesh);
+    // rozrzut głównie na boki od osi (ładunki tną zbiorniki wzdłużnie)
+    const dir = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5);
+    dir.addScaledVector(axisV, -dir.dot(axisV) * 0.6).normalize();
+    const vel = worldVel(s.vel).addScaledVector(dir, 20 + Math.random() * 70);
+    const spin = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(6);
+    debris.push({ obj: mesh, vel, spin, age: 0, drag: 0.25 + Math.random() * 0.3 });
+  }
+  rocket.group.visible = false;
+  rocketDestroyed = true;
+  // w rozrzedzonym powietrzu huk jest słabszy
+  const h = hearing(center);
+  sound.explosion(h.distance, h.delay, (stage1Detached ? 1.3 : 1.9) * (0.3 + 0.7 * Math.min(1, air * 4)));
 }
 
 /** Odległość kamery od punktu i opóźnienie dźwięku (tylko kamera naziemna). */
@@ -252,6 +322,8 @@ function resetAll() {
   rocket.stage1.visible = true;
   stage1Detached = false;
   rocketDestroyed = false;
+  flashTime = 0;
+  cameraPullback = 0;
   exhaust.clear();
   boosterExhaust.clear();
   missionControl.reset();
@@ -313,6 +385,12 @@ function updateCamera(dt: number) {
     case 'chase': {
       // kamera porusza się razem z rakietą; użytkownik może obracać i przybliżać
       camera.position.add(tmpV2.copy(focus).sub(prevFocus));
+      if (cameraPullback > 0 && cameraMode === 'chase') {
+        const off = tmpV2.copy(camera.position).sub(focus);
+        const d = off.length();
+        if (d < cameraPullback - 1) camera.position.addScaledVector(off, ((cameraPullback - d) / d) * Math.min(1, dt * 1.5));
+        else cameraPullback = 0;
+      }
       controls.target.copy(focus);
       camera.up.lerp(up, Math.min(1, dt * 2)).normalize();
       controls.update();
@@ -455,7 +533,15 @@ function syncGraphics(realDt: number) {
     flameLight.intensity = 0;
   }
 
-  // szczątki (połówki owiewki)
+  // błysk wybuchu FTS
+  if (flashTime > 0) {
+    flashTime = Math.max(0, flashTime - realDt * 1.6);
+    flashLight.intensity = 1.5e5 * flashTime * flashTime;
+  } else {
+    flashLight.intensity = 0;
+  }
+
+  // szczątki (połówki owiewki, fragmenty po FTS)
   for (let i = debris.length - 1; i >= 0; i--) {
     const d = debris[i];
     const simDt = realDt * warp;
@@ -463,8 +549,14 @@ function syncGraphics(realDt: number) {
     const g = tmpV.copy(d.obj.position).sub(EARTH_CENTER).normalize().multiplyScalar(-9.6 * simDt);
     d.vel.add(g);
     d.obj.position.addScaledVector(d.vel, simDt);
+    if (d.drag) {
+      const alt = d.obj.position.distanceTo(EARTH_CENTER) - R_EARTH;
+      d.vel.multiplyScalar(Math.exp(-d.drag * (airDensity(alt) / 1.225) * simDt));
+    }
     d.obj.rotateOnWorldAxis(tmpV2.copy(d.spin).normalize(), d.spin.length() * simDt);
-    if (d.age > 40) {
+    const underground = d.obj.position.distanceTo(EARTH_CENTER) < R_EARTH;
+    if (d.age > (d.drag ? 90 : 40) || underground) {
+      if (d.drag && d.obj instanceof THREE.Mesh) d.obj.geometry.dispose();
       scene.remove(d.obj);
       debris.splice(i, 1);
     }

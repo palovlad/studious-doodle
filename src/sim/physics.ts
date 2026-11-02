@@ -56,7 +56,8 @@ export type FlightPhase =
   | 'ORBIT'
   | 'ABORT'
   | 'SCRUBBED'
-  | 'IMPACT';
+  | 'IMPACT'
+  | 'TERMINATED'; // neutralizacja ładunkami FTS po przerwaniu lotu
 
 export type FlightEvent =
   | 'IGNITION'
@@ -71,6 +72,7 @@ export type FlightEvent =
   | 'ABORT'
   | 'SCRUB'
   | 'IMPACT'
+  | 'FTS'
   | 'BOOSTER_FLIP'
   | 'ENTRY_BURN'
   | 'ENTRY_BURN_END'
@@ -389,6 +391,21 @@ export class FlightSim {
     return false;
   }
 
+  /**
+   * Flight Termination System: po przerwaniu lotu rakieta (z silnikami wyłączonymi) jest
+   * niszczona ładunkami wybuchowymi, zanim spadnie w niekontrolowanym miejscu.
+   * Dostępne tylko w fazie ABORT. Odłączony wcześniej I stopień leci dalej po swojemu.
+   */
+  terminate(): boolean {
+    const s = this.state;
+    if (s.phase !== 'ABORT') return false;
+    s.phase = 'TERMINATED';
+    s.enginesOn = false;
+    s.throttle = 0;
+    this.emit('FTS');
+    return true;
+  }
+
   reset() {
     this.state = FlightSim.initialState();
     this.phaseTimer = 0;
@@ -436,6 +453,13 @@ export class FlightSim {
 
     s.t += dt;
     this.phaseTimer += dt;
+
+    // po neutralizacji pojazdu zostaje tylko ewentualny I stopień w locie powrotnym
+    if (s.phase === 'TERMINATED') {
+      this.updateBooster(dt);
+      this.updateTelemetry(0, 0);
+      return;
+    }
 
     // Narastanie / zanik ciągu (spool-up ok. 1,5 s)
     const target = s.enginesOn ? s.throttleCmd : 0;

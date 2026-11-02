@@ -26,6 +26,7 @@ Każdy push na `main` buduje projekt i publikuje go na GitHub Pages
 |---|---|
 | Start | **START** / `Spacja` |
 | Przerwanie lotu | **ABORT** / `A` |
+| Neutralizacja rakiety (FTS, po przerwaniu lotu) | **NEUTRALIZUJ** / `A` |
 | Reset | **RESET** / `R` |
 | Przepustnica (40–100%) | suwak / `↑` `↓` |
 | Kamera: pościg, pokładowa, naziemna, panorama, booster, Ziemia | przyciski / `1`–`6` |
@@ -35,6 +36,12 @@ Każdy push na `main` buduje projekt i publikuje go na GitHub Pages
 | Planowany ciąg landing burn (40–100%) | suwak „Ciąg lądowania” |
 | Przyspieszenie czasu | lista „Czas” (×1 … ×50) |
 | Obrót / zoom (kamera pościgowa) | mysz / dotyk |
+
+**Neutralizacja (Flight Termination System).** Po przerwaniu lotu silniki są wyłączone, a rakieta leci dalej
+balistycznie. Przycisk ABORT zmienia się wtedy w **NEUTRALIZUJ**. Kliknięcie (albo `A`) odpala ładunki FTS,
+co daje kulę ognia, błysk i fragmenty poszycia rozrzucone z prędkością pojazdu.
+Przez 0,8 s po ABORT przycisk jest zablokowany, żeby podwójne kliknięcie nie zniszczyło rakiety przypadkiem.
+Odłączony wcześniej I stopień leci dalej i próbuje wylądować na barce.
 
 ## Struktura
 

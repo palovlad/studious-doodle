@@ -129,7 +129,8 @@ export class MissionControl {
   }
 
   onEvent(ev: FlightEvent) {
-    this.trigger(ev);
+    // neutralizacja FTS: komunikat o utracie pojazdu (to samo nagranie co przy zderzeniu)
+    this.trigger(ev === 'FTS' ? 'IMPACT' : ev);
   }
 
   private trigger(name: string) {

@@ -7,6 +7,8 @@ export type CameraMode = 'chase' | 'onboard' | 'ground' | 'wide' | 'booster' | '
 export interface HudCallbacks {
   onLaunch(): void;
   onAbort(): void;
+  /** Neutralizacja rakiety (FTS) — dostępna po przerwaniu lotu. */
+  onTerminate(): void;
   onReset(): void;
   onThrottle(value: number): void;
   onCamera(mode: CameraMode): void;
@@ -53,6 +55,7 @@ const PHASE_LABELS: Record<FlightPhase, string> = {
   ABORT: 'PRZERWANIE LOTU',
   SCRUBBED: 'START WSTRZYMANY',
   IMPACT: 'ZDERZENIE Z ZIEMIĄ',
+  TERMINATED: 'RAKIETA ZNEUTRALIZOWANA',
 };
 
 export const EVENT_LABELS: Record<FlightEvent, string> = {
@@ -68,6 +71,7 @@ export const EVENT_LABELS: Record<FlightEvent, string> = {
   ABORT: 'ABORT — silniki wyłączone',
   SCRUB: 'Start wstrzymany na stole startowym',
   IMPACT: 'Zderzenie z powierzchnią',
+  FTS: 'FTS — rakieta zneutralizowana ładunkami wybuchowymi',
   BOOSTER_FLIP: 'I stopień: manewr obrotu silnikami do przodu',
   ENTRY_BURN: 'I stopień: entry burn (3 silniki)',
   ENTRY_BURN_END: 'I stopień: koniec entry burn',
@@ -119,6 +123,10 @@ export class Hud {
   private logList: HTMLElement;
   private launchBtn: HTMLButtonElement;
   private abortBtn: HTMLButtonElement;
+  /** Tryb przycisku ABORT: przerwanie lotu albo (po przerwaniu) neutralizacja FTS. */
+  private abortMode: 'abort' | 'fts' = 'abort';
+  /** Chwila uzbrojenia FTS — krótka blokada chroni przed przypadkowym podwójnym kliknięciem. */
+  private ftsArmedAt = 0;
   private resetBtn: HTMLButtonElement;
   private throttle: HTMLInputElement;
   private throttleLabel: HTMLElement;
@@ -265,7 +273,7 @@ export class Hud {
     this.abortBtn.title = 'Przerwij lot (A)';
     this.resetBtn.title = 'Od nowa (R)';
     this.launchBtn.onclick = () => this.cb.onLaunch();
-    this.abortBtn.onclick = () => this.cb.onAbort();
+    this.abortBtn.onclick = () => this.pressAbort();
     this.resetBtn.onclick = () => this.cb.onReset();
     btnRow.append(this.launchBtn, this.abortBtn, this.resetBtn);
     ctl.appendChild(btnRow);
@@ -394,7 +402,7 @@ export class Hud {
     ctl.appendChild(warpRow);
 
     ctl.appendChild(
-      el('div', 'hint', 'Spacja: start · A: abort · R: reset · ↑/↓: ciąg · 1–6: kamera · M: dźwięk · V: komentarz · mysz: obrót/zoom'),
+      el('div', 'hint', 'Spacja: start · A: abort / neutralizacja · R: reset · ↑/↓: ciąg · 1–6: kamera · M: dźwięk · V: komentarz · mysz: obrót/zoom'),
     );
     this.root.appendChild(ctl);
 
@@ -415,7 +423,7 @@ export class Hud {
           break;
         case 'a':
         case 'A':
-          this.cb.onAbort();
+          this.pressAbort();
           break;
         case 'r':
         case 'R':
@@ -496,6 +504,29 @@ export class Hud {
     for (const [m, b] of this.camButtons) b.classList.toggle('active', m === mode);
   }
 
+  /** ABORT przerywa lot; w fazie przerwania ten sam przycisk (i klawisz A) odpala FTS. */
+  private pressAbort() {
+    if (this.abortMode === 'fts') {
+      if (performance.now() - this.ftsArmedAt < 800) return;
+      this.cb.onTerminate();
+    } else {
+      this.cb.onAbort();
+      // liczone od kliknięcia ABORT, nie od przełączenia przycisku w kolejnej klatce
+      this.ftsArmedAt = performance.now();
+    }
+  }
+
+  private setAbortMode(mode: 'abort' | 'fts') {
+    if (mode === this.abortMode) return;
+    this.abortMode = mode;
+    const fts = mode === 'fts';
+    this.abortBtn.textContent = fts ? 'NEUTRALIZUJ' : 'ABORT';
+    this.abortBtn.title = fts
+      ? 'Zniszcz rakietę ładunkami FTS, zanim spadnie w niekontrolowanym miejscu (A)'
+      : 'Przerwij lot (A)';
+    this.abortBtn.classList.toggle('fts', fts);
+  }
+
   resetUi() {
     this.logList.innerHTML = '';
     this.track = [];
@@ -513,7 +544,9 @@ export class Hud {
     const li = el('li');
     li.appendChild(el('span', 'log-t', fmtClock(t)));
     li.appendChild(el('span', 'log-msg', text));
-    if (ev === 'ABORT' || ev === 'IMPACT' || ev === 'SCRUB' || ev === 'LANDING_FAIL') li.classList.add('warn');
+    if (ev === 'ABORT' || ev === 'IMPACT' || ev === 'FTS' || ev === 'SCRUB' || ev === 'LANDING_FAIL') {
+      li.classList.add('warn');
+    }
     if (ev === 'ORBIT' || ev === 'LIFTOFF' || ev === 'LANDED') li.classList.add('good');
     this.logList.prepend(li);
     while (this.logList.children.length > 14) this.logList.lastChild?.remove();
@@ -574,7 +607,8 @@ export class Hud {
 
     const flying = s.phase !== 'PRELAUNCH' && s.phase !== 'SCRUBBED';
     this.launchBtn.disabled = s.phase !== 'PRELAUNCH';
-    this.abortBtn.disabled = !['IGNITION', 'ASCENT', 'COAST', 'STAGE2'].includes(s.phase);
+    this.setAbortMode(s.phase === 'ABORT' || s.phase === 'TERMINATED' ? 'fts' : 'abort');
+    this.abortBtn.disabled = !['IGNITION', 'ASCENT', 'COAST', 'STAGE2', 'ABORT'].includes(s.phase);
     this.resetBtn.disabled = !flying && s.phase !== 'SCRUBBED';
 
     // ślad trajektorii
